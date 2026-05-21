@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, differential_evolution
 
-from config import FERMI_CSV, INVERSION_RANDOM_SEED, SWIFT_CSV
+from config import (
+    FERMI_CSV,
+    FERMI_INVERSION_FIGURE,
+    INVERSION_RANDOM_SEED,
+    SWIFT_CSV,
+    SWIFT_INVERSION_FIGURE,
+)
 
 try:
     import matplotlib
@@ -344,9 +350,9 @@ class PopulationAnalyzer:
 
 
 class PopulationPlotter:
-    def __init__(self, df_solutions: pd.DataFrame, output_prefix: str):
+    def __init__(self, df_solutions: pd.DataFrame, output_path: str):
         self.df = df_solutions
-        self.output_prefix = output_prefix
+        self.output_path = output_path
 
     def create_population_plot(self):
         if not MATPLOTLIB_AVAILABLE:
@@ -361,12 +367,11 @@ class PopulationPlotter:
         self._plot_fit_quality(axes[1, 1])
 
         plt.tight_layout()
-        output_path = f'figures/{self.output_prefix}_population_optimized.png'
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_path, dpi=150, bbox_inches='tight')
         plt.close()
 
-        print(f"Population plot saved to {output_path}")
-        return output_path
+        print(f"Population plot saved to {self.output_path}")
+        return self.output_path
 
     def _plot_spin_period_distribution(self, ax):
         ax.hist(
@@ -457,11 +462,13 @@ class ParameterInversionStudy:
         self,
         filepath: str,
         output_prefix: str,
+        output_figure: str,
         optimization_method: str = 'global',
         sample_size: int = 2000
     ):
         self.filepath = filepath
         self.output_prefix = output_prefix
+        self.output_figure = output_figure
         self.optimization_method = optimization_method
         self.sample_size = sample_size
         self.df = self._load_data()
@@ -498,7 +505,7 @@ class ParameterInversionStudy:
 
     def _create_plots(self):
         if self.solutions_df is not None:
-            plotter = PopulationPlotter(self.solutions_df, self.output_prefix)
+            plotter = PopulationPlotter(self.solutions_df, self.output_figure)
             plotter.create_population_plot()
 
     def _print_results(self):
@@ -518,6 +525,7 @@ if __name__ == "__main__":
         fermi_study = ParameterInversionStudy(
             filepath=FERMI_CSV,
             output_prefix='fermi',
+            output_figure=FERMI_INVERSION_FIGURE,
             optimization_method='global'
         )
         fermi_stats = fermi_study.run_analysis()
@@ -528,6 +536,7 @@ if __name__ == "__main__":
         swift_study = ParameterInversionStudy(
             filepath=SWIFT_CSV,
             output_prefix='swift',
+            output_figure=SWIFT_INVERSION_FIGURE,
             optimization_method='global'
         )
         swift_stats = swift_study.run_analysis()
