@@ -1,173 +1,153 @@
-# The Fifty-Fifty Problem: GRB Spectral Lag Analysis
+# GRB Spectral Lag Catalog and Analysis
 
-This project implements the analysis pipeline for studying spectral lags in gamma-ray bursts (GRBs), proposing a rotating magnetosphere model to explain the observed 50/50 split between positive and negative lags.
+This repository contains the processed Fermi/GBM and Swift/BAT spectral-lag catalogs and the Python scripts used to reproduce the statistical analysis and figures for the manuscript.
 
-## Overview
+Raw NASA event files are not included. They can be downloaded again with the optional downloader scripts, but the main analysis starts from the processed CSV catalogs included here.
 
-The population of GRB spectral lags splits exactly in half: 49.6% positive versus 50.4% negative. This "coin flip" distribution, combined with complete spatial isotropy and identical exponential magnitude distributions, systematically excludes all geometric viewing-angle models and points to an intrinsic mechanism involving random magnetic polarity in nascent neutron star magnetospheres.
+## Current Catalogs
 
-## Key Findings
+| Instrument | Measured lags | Significant positive | Significant negative | Consistent with zero |
+| --- | ---: | ---: | ---: | ---: |
+| Fermi/GBM | 2128 | 1037 | 1051 | 40 |
+| Swift/BAT | 3157 | 241 | 206 | 2710 |
 
-| Dataset   | Total Events | Positive Lags | Negative Lags | Median | τ      |
-| --------- | ------------ | ------------- | ------------- | ------ | ------ |
-| Fermi GBM | 1,955        | 969 (49.6%)   | 986 (50.4%)   | 19.6 s | 27.1 s |
-| Swift BAT | 202          | 114 (56.4%)   | 88 (43.6%)    | 8.0 s  | 32.2 s |
+Duration metadata are included where matched to the public mission catalogs. Fermi/GBM has complete `T90` coverage in the processed table. Swift/BAT has partial `T90` coverage because not every locally processed event has a matching row in the public BAT summary table.
 
-### Spatial Isotropy Tests
+## Figures
 
-| Test                        | Fermi χ² | Fermi p-value | Swift χ² | Swift p-value |
-| --------------------------- | -------- | ------------- | -------- | ------------- |
-| Galactic Hemisphere         | 0.62     | 0.43          | 0.11     | 0.74          |
-| CMB Dipole                  | 1.93     | 0.17          | 0.02     | 0.89          |
-| Optimal Axis (max accuracy) | —        | 0.530         | —        | 0.525         |
+![Fermi lag distributions](figures/fig_fermi_lag_distributions.png)
 
-All tests are consistent with complete spatial isotropy (no preferred direction).
+![Swift lag distributions](figures/fig_swift_lag_distributions.png)
 
-### Parameter Inversion Results
+![Fermi and Swift comparison](figures/fig_fermi_swift_comparison.png)
 
-| Parameter       | Fermi GBM       | Swift BAT       |
-| --------------- | --------------- | --------------- |
-| Spin Period     | 1666 ± 2293 ms  | 1048 ± 2254 ms  |
-| Torus Radius    | 7.6 ± 11.2 r_LC | 7.2 ± 11.0 r_LC |
-| Escape Windings | 1.59 ± 2.21     | 1.18 ± 2.47     |
-| Success Rate    | 95.7%           | 83.7%           |
+![Fermi parameter inversion](figures/fermi_population_optimized.png)
 
-The recovered parameters are consistent with nascent neutron stars that have spun down from initial millisecond periods to 1-2 seconds during the prompt GRB emission phase.
+![Swift parameter inversion](figures/swift_population_optimized.png)
 
-## Physical Model
+## Repository Contents
 
-The magnetospheric wind model proposes that spectral lags originate from energy-dependent photon scattering through wound magnetic field structures surrounding nascent neutron stars:
-
-1. **50/50 Sign Split**: Random magnetic polarity (μ·L ≷ 0) from stochastic dynamo processes
-2. **Spatial Isotropy**: Random progenitor stellar orientations
-3. **Exponential Distribution**: Stochastic winding number from diffusive photon escape
-4. **~27s Timescale**: Propagation through ~7 r_LC torus with ~1-2 field-line windings
-
-The delay formula follows from magnetospheric geometry:
-
-```
-Δt = N_esc × 2πr_torus / c
-```
-
-where `r_torus` is measured in units of the light cylinder radius `r_LC = cP/(2π)`.
-
-## Project Structure
-
-```
-
+```text
 .
-├── run_analysis.py # Complete spatial and statistical analysis
-├── run_parameter_inversion.py # Magnetospheric parameter fitting
-├── fermi_full_data.csv # Fermi GBM spectral lag measurements (1,955 events)
-├── swift_full_data.csv # Swift BAT spectral lag measurements (202 events)
+├── fermi_full_data.csv
+├── swift_full_data.csv
+├── config.py
+├── reporting.py
+├── grb_lag_common.py
+├── run_pipeline.py
+├── fermi_preprocessing.py
+├── swift_preprocessing.py
+├── fermi_add_metadata.py
+├── swift_add_metadata.py
+├── run_analysis.py
+├── run_parameter_inversion.py
+├── run_magnetic_flow_calculation.py
+├── fermi_download.py
+├── swift_download.py
 ├── figures/
-│ ├── fig_fermi_lag_distributions.png # Fermi lag histograms
-│ ├── fig_swift_lag_distributions.png # Swift lag histograms
-│ ├── fig_fermi_swift_comparison.png # Multi-instrument sky maps
-│ ├── fermi_population_optimized.png # Fermi parameter inversion
-│ └── swift_population_optimized.png # Swift parameter inversion
-├── paper.tex # LaTeX manuscript source
-├── paper.pdf # Compiled manuscript
-├── references.bib # Bibliography
-└── README.md # This file
-
+└── requirements.txt
 ```
+
+Shared constants live in `config.py`, shared printing helpers in `reporting.py`, and shared lag-estimation utilities in `grb_lag_common.py`. Instrument-specific scripts remain flat command-line programs so the workflow is easy to reproduce without installing a package.
 
 ## Installation
 
-Requires Python ≥ 3.8. Install dependencies:
+Python 3.10 or newer is recommended.
 
+```bash
+pip install -r requirements.txt
 ```
-pip install numpy scipy pandas matplotlib
+
+Fermi preprocessing uses `gbm-data-tools`. On some Windows systems this dependency is easier to run from WSL/Linux. The already processed `fermi_full_data.csv` does not require rerunning Fermi preprocessing.
+
+## Reproduce Analysis From Included CSVs
+
+The recommended entrypoint starts from the included processed CSVs:
+
+```bash
+python run_pipeline.py
 ```
 
-## Usage
+This validates both catalogs, runs the statistical analysis, and regenerates the main figures.
 
-### Run Complete Analysis
+Run the same workflow plus the illustrative parameter inversion:
+
+```bash
+python run_pipeline.py --with-inversion
+```
+
+Run only the statistical analysis and regenerate the main figures:
 
 ```bash
 python run_analysis.py
 ```
 
-This performs:
-
-- Galactic hemisphere test (χ² contingency)
-- CMB dipole correlation test
-- Optimal axis search (Powell optimization)
-- Lag magnitude spatial gradient analysis
-- Temporal stability analysis
-- Exponential distribution fitting
-
-### Run Parameter Inversion
+Run the illustrative neutron-star transport parameter inversion:
 
 ```bash
 python run_parameter_inversion.py
 ```
 
-This recovers magnetospheric parameters (P, r_torus, N_esc) from observed lags using differential evolution optimization.
+These commands read `fermi_full_data.csv` and `swift_full_data.csv` and write plots into `figures/`.
 
-## Data Format
+`run_magnetic_flow_calculation.py` is a supplementary theory-side calculation script. It is not required for regenerating the processed catalogs or the main statistical figures.
 
-The CSV data files contain:
+## Optional Full Reprocessing
 
-| Column           | Description                           |
-| ---------------- | ------------------------------------- |
-| `filename`       | Original TTE file identifier          |
-| `ra`             | Right ascension (degrees)             |
-| `dec`            | Declination (degrees)                 |
-| `lag_ms`         | Spectral lag in milliseconds (signed) |
-| `lag_error`      | Measurement uncertainty               |
-| `is_significant` | Whether τ ≥ 2σ_τ                      |
-| `lag_type`       | "positive" or "negative"              |
+The raw mission files are large and are intentionally excluded from the repository. To rebuild the catalogs from raw public data, run the workflow below after downloading the raw files.
 
-## Testable Predictions
+Download raw files:
 
-The rotating magnetosphere model makes several predictions:
-
-1. **Quasi-periodic oscillations**: ~1 kHz → ~1 Hz frequency evolution during burst
-2. **High linear polarization**: ~70% from synchrotron emission
-3. **Lag-luminosity correlation**: From plasma density dependence
-4. **Long/short GRB differences**: Different progenitor physics
-5. **Cosmological time dilation**: τ_obs = τ_int(1 + z)
-
-## Figures
-
-### Fermi GBM Lag Distributions
-
-![Fermi Lag Distributions](./figures/fig_fermi_lag_distributions.png)
-
-### Swift BAT Lag Distributions
-
-![Swift Lag Distributions](./figures/fig_swift_lag_distributions.png)
-
-### Multi-Instrument Comparison
-
-![Fermi-Swift Comparison](./figures/fig_fermi_swift_comparison.png)
-
-### Fermi Parameter Inversion
-
-![Fermi Population](./figures/fermi_population_optimized.png)
-
-### Swift Parameter Inversion
-
-![Swift Population](./figures/swift_population_optimized.png)
-
-## Citation
-
-If using this code or results, please cite:
-
-```bibtex
-@article{chudzik2025grb,
-  title={The Fifty-Fifty Problem: Why Half of All Gamma-Ray Bursts Run Backwards in Time},
-  author={Chudzik, Artur},
-  year={2025}
-}
+```bash
+python fermi_download.py
+python swift_download.py
 ```
 
-## References
+Preprocess event data into lag catalogs:
 
-- Meegan, C. et al. (2009). The Fermi Gamma-ray Burst Monitor. ApJ, 702, 791.
-- Barthelmy, S.D. et al. (2005). The Burst Alert Telescope (BAT) on the Swift MIDEX Mission. SSRv, 120, 143.
-- Norris, J.P. et al. (1996). Attributes of Pulses in Long Bright Gamma-Ray Bursts. ApJ, 459, 393.
-- Thompson, C. & Duncan, R.C. (1993). Neutron Star Dynamos and the Origins of Pulsar Magnetism. ApJ, 408, 194.
-- Duncan, R.C. & Thompson, C. (1992). Formation of Very Strongly Magnetized Neutron Stars. ApJ, 392, L9.
+```bash
+python fermi_preprocessing.py
+python swift_preprocessing.py
+```
+
+Add public catalog metadata:
+
+```bash
+python fermi_add_metadata.py
+python swift_add_metadata.py
+```
+
+Then rerun:
+
+```bash
+python run_pipeline.py --with-inversion
+```
+
+The same full rebuild can be launched as:
+
+```bash
+python run_pipeline.py --with-preprocessing
+```
+
+To also fetch raw public files first:
+
+```bash
+python run_pipeline.py --download
+```
+
+## Notes On Significance And Spatial Tests
+
+The full measured catalogs retain events with lags consistent with zero. The positive/negative population fractions are reported for the uniformly defined significant-lag subset, using `lag_significance >= 2`.
+
+Directional tests in `run_analysis.py` are empirical null checks for large-scale systematics. The script reports raw p-values and Bonferroni-adjusted p-values for the directional test family.
+
+## Data Columns
+
+Both public CSV catalogs use the same schema:
+
+```text
+instrument, filename, grb_name, grb_time_utc, ra, dec,
+lag_ms, lag_error, lag_significance, is_significant,
+lag_type, lag_class, t90_s, t90_error_s, t50_s,
+t50_error_s, duration_class
+```

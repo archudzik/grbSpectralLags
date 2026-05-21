@@ -1,0 +1,7 @@
+numpy
+pandas
+scipy
+matplotlib
+astropy
+beautifulsoup4
+gbm-data-tools

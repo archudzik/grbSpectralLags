@@ -1,3 +1,4 @@
+import re
 from typing import Tuple, Optional, List, Dict
 from dataclasses import dataclass
 import numpy as np
@@ -5,6 +6,17 @@ import pandas as pd
 from scipy import stats, optimize, signal
 import glob
 import os
+
+from config import (
+    COMPARISON_FIGURE,
+    DIRECTIONAL_TEST_FAMILY_SIZE as CONFIG_DIRECTIONAL_TEST_FAMILY_SIZE,
+    FERMI_CSV,
+    FERMI_LAG_FIGURE,
+    OPTIMAL_AXIS_RANDOM_SEED,
+    SWIFT_CSV,
+    SWIFT_LAG_FIGURE,
+)
+from reporting import p_value_interpretation, print_rule
 
 try:
     import matplotlib
@@ -75,7 +87,51 @@ class DataProcessor:
         if 'l' not in df.columns or 'b' not in df.columns:
             df = DataProcessor._add_galactic_coordinates(df)
 
+        df = DataProcessor._add_lag_metadata(df)
+
         return df
+
+    @staticmethod
+    def _add_lag_metadata(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+
+        if 'lag_error' in df.columns:
+            error_column = 'lag_error'
+        elif 'lag_error_ms' in df.columns:
+            error_column = 'lag_error_ms'
+        else:
+            error_column = None
+
+        if error_column is not None:
+            df['lag_significance'] = (
+                df['lag_ms'].abs() / df[error_column]
+            ).replace([np.inf, -np.inf], np.nan)
+        elif 'lag_significance' not in df.columns:
+            df['lag_significance'] = np.nan
+
+        if 'is_significant' not in df.columns:
+            df['is_significant'] = df['lag_significance'] >= 2.0
+        else:
+            df['is_significant'] = df['is_significant'].astype(bool)
+
+        if 'lag_type' not in df.columns:
+            df['lag_type'] = np.where(
+                df['lag_ms'] >= 0, 'positive', 'negative')
+
+        if 'lag_class' not in df.columns:
+            df['lag_class'] = np.where(
+                ~df['is_significant'],
+                'consistent_with_zero',
+                np.where(df['lag_ms'] > 0,
+                         'significant_positive',
+                         'significant_negative')
+            )
+
+        return df
+
+    @staticmethod
+    def significant_subset(df: pd.DataFrame) -> pd.DataFrame:
+        return df[df['is_significant']].copy()
 
     @staticmethod
     def _add_galactic_coordinates(df: pd.DataFrame) -> pd.DataFrame:
@@ -87,6 +143,14 @@ class DataProcessor:
 
 
 class HemisphereTest:
+    DIRECTIONAL_TEST_FAMILY_SIZE = CONFIG_DIRECTIONAL_TEST_FAMILY_SIZE
+
+    @staticmethod
+    def bonferroni_adjust(p_value: float, n_tests: int = None) -> float:
+        if n_tests is None:
+            n_tests = HemisphereTest.DIRECTIONAL_TEST_FAMILY_SIZE
+        return min(float(p_value) * n_tests, 1.0)
+
     @staticmethod
     def galactic_hemisphere(df: pd.DataFrame) -> Dict:
         north_mask = df['b'] > 0
@@ -116,7 +180,9 @@ class HemisphereTest:
             'south_pos_fraction': n_pos_south / total_south,
             'chi2': chi2,
             'dof': dof,
-            'p_value': p
+            'p_value': p,
+            'p_bonferroni': HemisphereTest.bonferroni_adjust(p),
+            'bonferroni_n_tests': HemisphereTest.DIRECTIONAL_TEST_FAMILY_SIZE
         }
 
     @staticmethod
@@ -159,15 +225,18 @@ class HemisphereTest:
             'chi2': chi2,
             'dof': dof,
             'p_value': p,
+            'p_bonferroni': HemisphereTest.bonferroni_adjust(p),
+            'bonferroni_n_tests': HemisphereTest.DIRECTIONAL_TEST_FAMILY_SIZE,
             'cmb_direction': (cmb_l, cmb_b)
         }
 
 
 class OptimalAxisSearch:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, random_seed: int = OPTIMAL_AXIS_RANDOM_SEED):
         self.vectors = np.array([CoordinateTransform.to_cartesian(l, b)
                                  for l, b in zip(df['l'], df['b'])])
         self.signs = np.where(df['lag_type'] == 'positive', 1, -1)
+        self.rng = np.random.default_rng(random_seed)
 
     def objective_function(self, params: np.ndarray) -> float:
         theta, phi = params
@@ -193,8 +262,8 @@ class OptimalAxisSearch:
         convergence_results = []
 
         for trial in range(n_trials):
-            initial_theta = np.random.uniform(0, np.pi)
-            initial_phi = np.random.uniform(0, 2 * np.pi)
+            initial_theta = self.rng.uniform(0, np.pi)
+            initial_phi = self.rng.uniform(0, 2 * np.pi)
 
             result = optimize.minimize(
                 self.objective_function,
@@ -524,7 +593,8 @@ class SampleStatistics:
 
 class GRBStudy:
     def __init__(self, filepath: str = 'data.csv'):
-        self.df = DataProcessor.load_and_prepare(filepath)
+        self.full_df = DataProcessor.load_and_prepare(filepath)
+        self.df = DataProcessor.significant_subset(self.full_df)
         self.filepath = filepath
         self.stats = SampleStatistics.compute_basic_stats(self.df)
         self.distributions = SampleStatistics.analyze_lag_distributions(
@@ -532,9 +602,9 @@ class GRBStudy:
         self.shape_tests = SampleStatistics.test_distribution_shape(self.df)
 
     def run_complete_analysis(self) -> Dict:
-        print(f"{'='*70}")
+        print(f"{'*'*70}")
         print(f"GRB SPECTRAL LAG SPATIAL ANALYSIS")
-        print(f"{'='*70}\n")
+        print(f"{'*'*70}\n")
 
         print(f"Using file: ", self.filepath)
 
@@ -555,7 +625,6 @@ class GRBStudy:
         self._print_dipole_analysis(dipole_results)
 
         exp_results = self.analyze_exponential_distributions()
-        self.winding_calculator(tau_obs=exp_results["tau_obs"])
 
         return {
             'sample_statistics': self.stats,
@@ -571,7 +640,19 @@ class GRBStudy:
     def _print_sample_statistics(self):
         print(f"SAMPLE COMPOSITION")
         print(f"{'-'*70}")
-        print(f"Total GRBs analyzed:        {self.stats['n_total']}")
+        n_measured = len(self.full_df)
+        n_significant = len(self.df)
+        class_counts = self.full_df['lag_class'].value_counts()
+        n_pos_sig = class_counts.get('significant_positive', 0)
+        n_neg_sig = class_counts.get('significant_negative', 0)
+        n_zero = class_counts.get('consistent_with_zero', 0)
+        print(f"Total measured GRBs:        {n_measured}")
+        print(f"Significant GRBs analyzed:  {n_significant}")
+        print(f"Consistent with zero:       {n_zero}")
+        print(f"  significant_positive:     {n_pos_sig}")
+        print(f"  significant_negative:     {n_neg_sig}")
+        print(f"  consistent_with_zero:     {n_zero}")
+        print()
         print(
             f"Positive lags:              {self.stats['n_positive']} ({self.stats['positive_fraction']:.3f})")
         print(
@@ -621,23 +702,23 @@ class GRBStudy:
 
             print(f"Positive lags:")
             print(f"  Uniform (linear) fit:")
-            print(f"    R² = {pos_uni['linear_r_squared']:.6f}")
+            print(f"    R^2 = {pos_uni['linear_r_squared']:.6f}")
             print(f"    KS p-value = {pos_uni['ks_pvalue']:.4f}")
             print()
             print(f"  Exponential fit:")
-            print(f"    R² = {pos_exp['r_squared']:.6f}")
+            print(f"    R^2 = {pos_exp['r_squared']:.6f}")
             print(f"    Scale = {pos_exp['scale']:.1f} ms")
             print(f"    Half-life = {pos_exp['half_life']:.1f} ms")
-            print(f"    Decay constant λ = {pos_exp['decay_constant']:.6f}")
+            print(f"    Decay constant lambda = {pos_exp['decay_constant']:.6f}")
             print(f"    KS p-value = {pos_exp['ks_pvalue']:.4f}")
             print()
             print(f"  Best fit: {pos_comp['best_fit'].upper()}")
             print(
-                f"    ΔR² = {pos_comp['r_squared_comparison']['difference']:.6f}")
+                f"    delta R^2 = {pos_comp['r_squared_comparison']['difference']:.6f}")
             if pos_comp['best_fit'] == 'exponential':
-                print(f"    ✓ Exponential distribution fits better")
+                print(f"    OK Exponential distribution fits better")
             else:
-                print(f"    ✓ Uniform distribution fits better")
+                print(f"    OK Uniform distribution fits better")
             print()
 
         neg_comp = self.shape_tests['negative_comparison']
@@ -647,23 +728,23 @@ class GRBStudy:
 
             print(f"Negative lags (absolute values):")
             print(f"  Uniform (linear) fit:")
-            print(f"    R² = {neg_uni['linear_r_squared']:.6f}")
+            print(f"    R^2 = {neg_uni['linear_r_squared']:.6f}")
             print(f"    KS p-value = {neg_uni['ks_pvalue']:.4f}")
             print()
             print(f"  Exponential fit:")
-            print(f"    R² = {neg_exp['r_squared']:.6f}")
+            print(f"    R^2 = {neg_exp['r_squared']:.6f}")
             print(f"    Scale = {neg_exp['scale']:.1f} ms")
             print(f"    Half-life = {neg_exp['half_life']:.1f} ms")
-            print(f"    Decay constant λ = {neg_exp['decay_constant']:.6f}")
+            print(f"    Decay constant lambda = {neg_exp['decay_constant']:.6f}")
             print(f"    KS p-value = {neg_exp['ks_pvalue']:.4f}")
             print()
             print(f"  Best fit: {neg_comp['best_fit'].upper()}")
             print(
-                f"    ΔR² = {neg_comp['r_squared_comparison']['difference']:.6f}")
+                f"    delta R^2 = {neg_comp['r_squared_comparison']['difference']:.6f}")
             if neg_comp['best_fit'] == 'exponential':
-                print(f"    ✓ Exponential distribution fits better")
+                print(f"    OK Exponential distribution fits better")
             else:
-                print(f"    ✓ Uniform distribution fits better")
+                print(f"    OK Uniform distribution fits better")
             print()
 
         print(f"Distribution shape metrics:")
@@ -682,9 +763,9 @@ class GRBStudy:
         print(f"  KS statistic:             {ks_test['statistic']:.4f}")
         print(f"  p-value:                  {ks_test['pvalue']:.4f}")
         if ks_test['pvalue'] > 0.05:
-            print(f"  ✓ Distributions are statistically similar")
+            print(f"  OK Distributions are statistically similar")
         else:
-            print(f"  ✗ Distributions differ significantly")
+            print(f"  FAIL Distributions differ significantly")
         print()
 
     def _print_galactic_hemisphere(self, results: Dict):
@@ -697,7 +778,7 @@ class GRBStudy:
         print(
             f"  Positive fraction:        {results['north_pos_fraction']:.3f}")
         print()
-        print(f"Southern hemisphere (b ≤ 0):")
+        print(f"Southern hemisphere (b <= 0):")
         print(f"  Total bursts:             {results['south_total']}")
         print(f"  Positive lags:            {results['south_positive']}")
         print(f"  Negative lags:            {results['south_negative']}")
@@ -705,31 +786,47 @@ class GRBStudy:
             f"  Positive fraction:        {results['south_pos_fraction']:.3f}")
         print()
         print(
-            f"χ² = {results['chi2']:.2f}, dof = {results['dof']}, p = {results['p_value']:.4f}")
+            f"chi2 = {results['chi2']:.2f}, dof = {results['dof']}, p = {results['p_value']:.4f}")
+        print(
+            f"Bonferroni-adjusted p ({results['bonferroni_n_tests']} directional tests): "
+            f"{results['p_bonferroni']:.4f}"
+        )
+        print(
+            "  Interpretation: "
+            f"{p_value_interpretation(results['p_value'], adjusted_p=results['p_bonferroni'])}"
+        )
         print()
 
     def _print_cmb_dipole(self, results: Dict):
         print(f"CMB DIPOLE HEMISPHERE TEST")
         print(f"{'-'*70}")
-        print(f"CMB dipole direction: (α={168.0}°, δ={-7.0}°)")
+        print(f"CMB dipole direction: (alpha={168.0} deg, delta={-7.0} deg)")
         print(
-            f"                      (l={results['cmb_direction'][0]:.1f}°, b={results['cmb_direction'][1]:.1f}°)")
+            f"                      (l={results['cmb_direction'][0]:.1f} deg, b={results['cmb_direction'][1]:.1f} deg)")
         print()
-        print(f"Within 90° of CMB dipole:")
+        print(f"Within 90 deg of CMB dipole:")
         print(f"  Total bursts:             {results['close_total']}")
         print(f"  Positive lags:            {results['close_positive']}")
         print(f"  Negative lags:            {results['close_negative']}")
         print(
             f"  Positive fraction:        {results['close_pos_fraction']:.3f}")
         print()
-        print(f"Beyond 90° from CMB dipole:")
+        print(f"Beyond 90 deg from CMB dipole:")
         print(f"  Total bursts:             {results['far_total']}")
         print(f"  Positive lags:            {results['far_positive']}")
         print(f"  Negative lags:            {results['far_negative']}")
         print(f"  Positive fraction:        {results['far_pos_fraction']:.3f}")
         print()
         print(
-            f"χ² = {results['chi2']:.2f}, dof = {results['dof']}, p = {results['p_value']:.4f}")
+            f"chi2 = {results['chi2']:.2f}, dof = {results['dof']}, p = {results['p_value']:.4f}")
+        print(
+            f"Bonferroni-adjusted p ({results['bonferroni_n_tests']} directional tests): "
+            f"{results['p_bonferroni']:.4f}"
+        )
+        print(
+            "  Interpretation: "
+            f"{p_value_interpretation(results['p_value'], adjusted_p=results['p_bonferroni'])}"
+        )
         print()
 
     def _print_optimal_axis(self, results: Dict):
@@ -738,7 +835,7 @@ class GRBStudy:
         print(f"Optimization trials:        {results['n_trials']}")
         print(f"Maximum accuracy:           {results['accuracy']:.4f}")
         print(
-            f"Optimal axis location:      (l={results['l']:.1f}°, b={results['b']:.1f}°)")
+            f"Optimal axis location:      (l={results['l']:.1f} deg, b={results['b']:.1f} deg)")
         print(f"Convergence std dev:        {results['convergence_std']:.6f}")
         print(f"Optimization success:       {results['success']}")
         print()
@@ -750,26 +847,26 @@ class GRBStudy:
         all_data = results['all_sample']
         print(f"All {all_data['n_bursts']} GRBs:")
         print(
-            f"  Direction:                (l={all_data['l']:.1f}°, b={all_data['b']:.1f}°)")
+            f"  Direction:                (l={all_data['l']:.1f} deg, b={all_data['b']:.1f} deg)")
         print(f"  Magnitude:                {all_data['magnitude']:.4f}")
         print()
 
         pos_data = results['positive_lags']
         print(f"Positive lag subset ({pos_data['n_bursts']} GRBs):")
         print(
-            f"  Direction:                (l={pos_data['l']:.1f}°, b={pos_data['b']:.1f}°)")
+            f"  Direction:                (l={pos_data['l']:.1f} deg, b={pos_data['b']:.1f} deg)")
         print(f"  Magnitude:                {pos_data['magnitude']:.4f}")
         print()
 
         neg_data = results['negative_lags']
         print(f"Negative lag subset ({neg_data['n_bursts']} GRBs):")
         print(
-            f"  Direction:                (l={neg_data['l']:.1f}°, b={neg_data['b']:.1f}°)")
+            f"  Direction:                (l={neg_data['l']:.1f} deg, b={neg_data['b']:.1f} deg)")
         print(f"  Magnitude:                {neg_data['magnitude']:.4f}")
         print()
 
         print(
-            f"Positive-Negative dipole separation: {results['pos_neg_separation']:.1f}°")
+            f"Positive-Negative dipole separation: {results['pos_neg_separation']:.1f} deg")
         print()
 
     def analyze_exponential_distributions(self):
@@ -787,7 +884,7 @@ class GRBStudy:
         loc, scale = stats.expon.fit(positive_lags, floc=0)
         print(f"Fitted exponential parameters:")
         print(f"  Scale (mean) = {scale:.1f} ms = {scale/1000:.2f} s")
-        print(f"  Decay constant λ = {1/scale:.6f} per ms")
+        print(f"  Decay constant lambda = {1/scale:.6f} per ms")
         print(
             f"  Half-life = {scale * np.log(2):.1f} ms = {scale * np.log(2)/1000:.2f} s")
         print(f"  Median (theoretical) = {scale * np.log(2):.1f} ms")
@@ -799,11 +896,12 @@ class GRBStudy:
         print(f"  Statistic = {ks_stat:.4f}")
         print(f"  p-value = {ks_pval:.4f}")
         if ks_pval > 0.05:
-            print(f"  ✓ Consistent with exponential distribution")
+            print(f"  OK Consistent with exponential distribution")
         else:
-            print(f"  ✗ Deviates from exponential (p<0.05)")
+            print(f"  FAIL Deviates from exponential (p<0.05)")
 
         pos_scale = scale
+        pos_ks_pval = ks_pval
 
         print("\n2. NEGATIVE LAGS (absolute values)")
         print("-"*70)
@@ -811,7 +909,7 @@ class GRBStudy:
         loc, scale = stats.expon.fit(abs_neg_lags, floc=0)
         print(f"Fitted exponential parameters:")
         print(f"  Scale (mean) = {scale:.1f} ms = {scale/1000:.2f} s")
-        print(f"  Decay constant λ = {1/scale:.6f} per ms")
+        print(f"  Decay constant lambda = {1/scale:.6f} per ms")
         print(
             f"  Half-life = {scale * np.log(2):.1f} ms = {scale * np.log(2)/1000:.2f} s")
         print(f"  Median (theoretical) = {scale * np.log(2):.1f} ms")
@@ -823,11 +921,12 @@ class GRBStudy:
         print(f"  Statistic = {ks_stat:.4f}")
         print(f"  p-value = {ks_pval:.4f}")
         if ks_pval > 0.05:
-            print(f"  ✓ Consistent with exponential distribution")
+            print(f"  OK Consistent with exponential distribution")
         else:
-            print(f"  ✗ Deviates from exponential (p<0.05)")
+            print(f"  FAIL Deviates from exponential (p<0.05)")
 
         neg_scale = scale
+        neg_ks_pval = ks_pval
 
         print("\n3. COMPARISON: POSITIVE vs NEGATIVE")
         print("-"*70)
@@ -840,15 +939,14 @@ class GRBStudy:
             f"Relative difference: {abs(neg_scale - pos_scale) / pos_scale * 100:.1f}%")
 
         if abs(neg_scale - pos_scale) / pos_scale < 0.1:
-            print(f"\n✓ SAME timescale within 10%!")
-            print(f"  This suggests a SINGLE physical process")
-            print(f"  with symmetric ± behavior")
+            print(f"\nOK Similar fitted scales within 10%")
+            print(f"  This supports comparing the positive and negative lag samples")
+            print(f"  with the same summary statistic.")
         else:
             print(
-                f"\n⚠ Different timescales by {abs(neg_scale - pos_scale) / pos_scale * 100:.1f}%")
-            print(f"  Could indicate:")
-            print(f"  - Different physical mechanisms for ± lags")
-            print(f"  - OR sample/selection effects")
+                f"\nWARNING Different timescales by {abs(neg_scale - pos_scale) / pos_scale * 100:.1f}%")
+            print(f"  Treat the fitted scales as exploratory and inspect")
+            print(f"  possible sample or selection effects.")
 
         print("\n4. SHAPE STATISTICS")
         print("-"*70)
@@ -858,33 +956,45 @@ class GRBStudy:
         neg_kurt = stats.kurtosis(negative_lags)
 
         print(f"Positive skewness: {pos_skew:.2f}")
-        print(f"  → Right tail (exponential has skewness = 2)")
+        if pos_skew > 0:
+            print(f"  -> Right-tailed distribution")
+        else:
+            print(f"  -> No right-tail excess by skewness")
         print(f"Negative skewness: {neg_skew:.2f}")
-        print(f"  → Left tail (mirror of positive)")
+        if neg_skew < 0:
+            print(f"  -> Left-tailed distribution")
+        else:
+            print(f"  -> No left-tail excess by skewness")
         print()
         print(f"Positive kurtosis: {pos_kurt:.2f}")
-        print(f"  → Heavy tails (exponential has kurtosis = 6)")
+        if pos_kurt > 0:
+            print(f"  -> Heavier tails than a normal distribution")
+        else:
+            print(f"  -> No excess kurtosis relative to a normal distribution")
         print(f"Negative kurtosis: {neg_kurt:.2f}")
-        print(f"  → (closer to exponential if higher)")
+        if neg_kurt > 0:
+            print(f"  -> Heavier tails than a normal distribution")
+        else:
+            print(f"  -> No excess kurtosis relative to a normal distribution")
 
         print("\n5. QUANTILE-QUANTILE COMPARISON")
         print("-"*70)
         theoretical_median = pos_scale * np.log(2)
-        observed_median = np.median(positive_lags)
+        pos_observed_median = np.median(positive_lags)
         print(f"Positive lags:")
         print(f"  Theoretical median: {theoretical_median:.1f} ms")
-        print(f"  Observed median: {observed_median:.1f} ms")
-        print(f"  Ratio: {observed_median/theoretical_median:.3f}")
+        print(f"  Observed median: {pos_observed_median:.1f} ms")
+        print(f"  Ratio: {pos_observed_median/theoretical_median:.3f}")
 
         theoretical_median = neg_scale * np.log(2)
-        observed_median = np.median(abs_neg_lags)
+        neg_observed_median = np.median(abs_neg_lags)
         print(f"\nNegative lags:")
         print(f"  Theoretical median: {theoretical_median:.1f} ms")
-        print(f"  Observed median: {observed_median:.1f} ms")
-        print(f"  Ratio: {observed_median/theoretical_median:.3f}")
+        print(f"  Observed median: {neg_observed_median:.1f} ms")
+        print(f"  Ratio: {neg_observed_median/theoretical_median:.3f}")
 
         print("\n" + "="*70)
-        print("PHYSICAL INTERPRETATION")
+        print("DISTRIBUTION SUMMARY")
         print("="*70)
 
         avg_scale = (pos_scale + neg_scale) / 2
@@ -893,25 +1003,47 @@ class GRBStudy:
         print(f"\nCharacteristic timescale: {avg_scale/1000:.2f} seconds")
         print(f"Half-life: {avg_half_life/1000:.2f} seconds")
         print()
-        print("The exponential distributions indicate:")
+        print("Distribution diagnostics:")
         print()
-        print("✓ Peak at zero:")
-        print("  Most GRBs have small spectral lags")
-        print("  Few have very large lags")
+        near_zero_concentration = (
+            pos_observed_median < pos_scale and
+            neg_observed_median < neg_scale
+        )
+        if near_zero_concentration:
+            print("OK Concentration near zero:")
+            print("  Both observed medians are below their fitted mean scales")
+        else:
+            print("WARNING Concentration near zero not supported by median/scale check:")
+            print("  Inspect the lag distribution before drawing shape conclusions")
         print()
-        print("✓ Single characteristic timescale:")
-        print(f"  τ ~ {avg_scale/1000:.1f} seconds")
-        print("  This is a PHYSICAL parameter of the system")
+
+        similar_scales = abs(neg_scale - pos_scale) / pos_scale < 0.1
+        if similar_scales:
+            print("OK Similar characteristic scales:")
+            print(f"  tau ~ {avg_scale/1000:.1f} seconds")
+            print("  Treat this as a descriptive population scale")
+        else:
+            print("WARNING Positive and negative fitted scales differ by >10%:")
+            print("  Report the two fitted scales separately")
         print()
-        print("✓ NOT geometric/viewing angle effects:")
-        print("  Geometric models predict power laws or bimodal")
-        print("  Exponential suggests random/stochastic process")
-        print()
-        print("✓ Symmetric ± populations:")
-        print(
-            f"  Same timescale ({abs(neg_scale - pos_scale) / pos_scale * 100:.1f}% difference)")
-        print("  Same distribution shape")
-        print("  Different only in SIGN")
+
+        ks_pos_neg = stats.ks_2samp(positive_lags, abs_neg_lags)
+        if similar_scales and ks_pos_neg.pvalue > 0.05:
+            print("OK Positive and negative samples are similar by scale and KS test:")
+            print(
+                f"  Scale difference: {abs(neg_scale - pos_scale) / pos_scale * 100:.1f}%")
+            print(f"  KS p-value: {ks_pos_neg.pvalue:.4f}")
+        else:
+            print("WARNING Positive and negative sample similarity is not fully supported:")
+            print(
+                f"  Scale difference: {abs(neg_scale - pos_scale) / pos_scale * 100:.1f}%")
+            print(f"  KS p-value: {ks_pos_neg.pvalue:.4f}")
+
+        if pos_ks_pval <= 0.05 or neg_ks_pval <= 0.05:
+            print()
+            print("WARNING Exponential fits are descriptive only for this dataset:")
+            print(f"  Positive KS p-value: {pos_ks_pval:.4f}")
+            print(f"  Negative KS p-value: {neg_ks_pval:.4f}")
 
         return {
             'pos_scale': pos_scale,
@@ -927,7 +1059,7 @@ class GRBStudy:
         print("\n" + "="*70)
         print("MAGNETOSPHERIC LAG CALCULATOR (SIMPLE GRID SEARCH)")
         print("="*70)
-        print(f"Observed lag: τ_obs = {tau_obs:.2f} s\n")
+        print(f"Observed lag: tau_obs = {tau_obs:.2f} s\n")
 
         best_error = 1e10
         best_params = None
@@ -973,8 +1105,8 @@ class GRBStudy:
         print(f"  Total rotations:     N_rot = {p['N_rot']:.0f}")
         print(
             f"  Escape windings:     N_esc = {p['N_esc']:.0f} ({p['N_esc']/p['N_rot']*100:.1f}%)")
-        print(f"  Predicted lag:       τ_pred = {p['tau_pred']:.2f} s")
-        print(f"  Observed lag:        τ_obs = {tau_obs:.2f} s")
+        print(f"  Predicted lag:       tau_pred = {p['tau_pred']:.2f} s")
+        print(f"  Observed lag:        tau_obs = {tau_obs:.2f} s")
         print(
             f"  Error:               {abs(p['tau_pred']-tau_obs):.2f} s ({abs(p['tau_pred']-tau_obs)/tau_obs*100:.1f}%)")
         print(f"\nInterpretation:")
@@ -1018,15 +1150,15 @@ class GRBStudy:
             separations, lag_magnitudes)
         pearson_corr, pearson_p = stats.pearsonr(separations, lag_magnitudes)
 
-        print(f"\nOptimal separation axis: (l={l_opt:.1f}°, b={b_opt:.1f}°)")
+        print(f"\nOptimal separation axis: (l={l_opt:.1f} deg, b={b_opt:.1f} deg)")
         print(f"\nCorrelation between angular separation and |lag|:")
-        print(f"  Spearman ρ = {spearman_corr:.4f}, p = {spearman_p:.4f}")
+        print(f"  Spearman rho = {spearman_corr:.4f}, p = {spearman_p:.4f}")
         print(f"  Pearson r = {pearson_corr:.4f}, p = {pearson_p:.4f}")
 
         if abs(spearman_corr) < 0.1:
-            print(f"  ✓ No significant spatial gradient in lag magnitude")
+            print(f"  OK No significant spatial gradient in lag magnitude")
         else:
-            print(f"  ⚠ Moderate spatial gradient detected")
+            print(f"  WARNING Moderate spatial gradient detected")
 
         # Binned analysis: divide sky into 4 angular zones
         bins = [0, 45, 90, 135, 180]
@@ -1048,7 +1180,7 @@ class GRBStudy:
                 bin_medians.append(median_lag)
                 bin_means.append(mean_lag)
                 print(
-                    f"{bins[i]:.0f}°-{bins[i+1]:.0f}°{'':<6} {np.sum(mask):<8} {median_lag:<15.1f} {mean_lag:.1f}")
+                    f"{bins[i]:.0f} deg-{bins[i+1]:.0f} deg{'':<6} {np.sum(mask):<8} {median_lag:<15.1f} {mean_lag:.1f}")
 
         return {
             'optimal_axis': (l_opt, b_opt),
@@ -1065,7 +1197,7 @@ class GRBStudy:
     def temporal_analysis(self) -> Dict:
         """
         Analyze temporal patterns in spectral lag measurements.
-        Extracts dates from obs_id/filename and tests for temporal trends.
+        Extracts temporal ordering from filename patterns when possible.
         """
         print("\n" + "="*70)
         print("TEMPORAL ANALYSIS")
@@ -1074,25 +1206,40 @@ class GRBStudy:
         temporal_data = []
         data_type = None
 
-        # Try to determine data type and extract temporal info
         for idx, row in self.df.iterrows():
-            obs_id = str(row.get('obs_id', ''))
             filename = str(row.get('filename', ''))
+            grb_time_utc = row.get('grb_time_utc')
 
-            # Try Fermi format: glg_tte_n9_bn<YYMMDDFFF>_v00.fit
+            if pd.notna(grb_time_utc):
+                timestamp = pd.to_datetime(grb_time_utc, errors='coerce')
+                if pd.notna(timestamp):
+                    temporal_data.append({
+                        'date_key': (
+                            timestamp.year * 10000
+                            + timestamp.month * 100
+                            + timestamp.day
+                        ),
+                        'sort_key': timestamp.timestamp(),
+                        'lag_ms': row['lag_ms'],
+                        'lag_type': row['lag_type']
+                    })
+                    data_type = 'Swift' if filename.startswith('sw') else 'Fermi'
+                    continue
+
+            # Fermi format: glg_tte_n9_bn<YYMMDDFFF>_v00.fit
             if 'glg_tte' in filename and '_bn' in filename:
                 try:
-                    # Extract YYMMDDFFF from filename
                     bn_part = filename.split('_bn')[1].split('_')[0]
                     if len(bn_part) >= 7:
                         yy = int(bn_part[0:2])
                         mm = int(bn_part[2:4])
                         dd = int(bn_part[4:6])
-                        # Create sortable date key: YYYYMMDD (assume 2000s)
                         year = 2000 + yy if yy < 50 else 1900 + yy
                         date_key = year * 10000 + mm * 100 + dd
+
                         temporal_data.append({
                             'date_key': date_key,
+                            'sort_key': date_key,
                             'lag_ms': row['lag_ms'],
                             'lag_type': row['lag_type']
                         })
@@ -1100,38 +1247,38 @@ class GRBStudy:
                 except (ValueError, IndexError):
                     continue
 
-            # Try Swift format: obs_id as numeric sequence
-            elif obs_id.isdigit() and len(obs_id) >= 8:
-                try:
-                    # Use obs_id as sequential identifier
-                    obs_num = int(obs_id)
+            # Swift filenames do not contain calendar dates. Use local event
+            # metadata added by swift_add_metadata.py when catalog UTC is absent.
+            elif filename.startswith('sw') and 'bevshsp' in filename:
+                trigger_time_met = row.get('trigger_time_met')
+                if pd.notna(trigger_time_met):
+                    swift_epoch = pd.Timestamp('2001-01-01T00:00:00').timestamp()
                     temporal_data.append({
-                        'date_key': obs_num,
+                        'date_key': row.get('swift_data_year_month', ''),
+                        'sort_key': swift_epoch + float(trigger_time_met),
                         'lag_ms': row['lag_ms'],
                         'lag_type': row['lag_type']
                     })
                     data_type = 'Swift'
-                except ValueError:
-                    continue
 
         if len(temporal_data) < 10:
-            print(f"Insufficient temporal data extracted")
+            print("Insufficient temporal data extracted")
             print(f"  Extracted: {len(temporal_data)} events")
             print(f"  Data type: {data_type if data_type else 'Unknown'}")
             return {'status': 'insufficient_data', 'n_extracted': len(temporal_data)}
 
-        temporal_df = pd.DataFrame(temporal_data).sort_values('date_key')
+        temporal_df = pd.DataFrame(temporal_data).sort_values('sort_key')
 
         print(f"\nData type: {data_type}")
         print(f"Extracted temporal sequence: {len(temporal_df)} observations")
         if data_type == 'Fermi':
             print(
                 f"Date range: {temporal_df['date_key'].min()} - {temporal_df['date_key'].max()} (YYYYMMDD)")
-        else:
+        elif data_type == 'Swift':
             print(
-                f"Observation ID range: {temporal_df['date_key'].min()} - {temporal_df['date_key'].max()}")
+                f"Temporal key range: {temporal_df['sort_key'].min():.3f} - "
+                f"{temporal_df['sort_key'].max():.3f}")
 
-        # Test for temporal trend in lag magnitude
         lag_magnitudes = np.abs(temporal_df['lag_ms'].values)
         obs_sequence = np.arange(len(temporal_df))
 
@@ -1139,46 +1286,42 @@ class GRBStudy:
             obs_sequence, lag_magnitudes)
 
         print(f"\nTemporal trend in |lag| magnitude:")
-        print(f"  Spearman ρ = {spearman_corr:.4f}, p = {spearman_p:.4f}")
+        print(f"  Spearman rho = {spearman_corr:.4f}, p = {spearman_p:.4f}")
 
         if spearman_p < 0.05:
             trend = "increasing" if spearman_corr > 0 else "decreasing"
-            print(f"  ⚠ Significant {trend} trend detected")
+            print(f"  WARNING Significant {trend} trend detected")
         else:
-            print(f"  ✓ No significant temporal trend")
+            print("  OK No significant temporal trend")
 
-        # Test for autocorrelation in consecutive observations
         if len(lag_magnitudes) > 50:
-            # Lag-1 autocorrelation
             autocorr = np.corrcoef(
                 lag_magnitudes[:-1], lag_magnitudes[1:])[0, 1]
             print(f"\nLag-1 autocorrelation: {autocorr:.4f}")
 
             if abs(autocorr) > 0.2:
-                print(f"  ⚠ Consecutive observations show correlation")
-                print(f"    (possible instrumental effects or real clustering)")
+                print("  WARNING Consecutive observations show correlation")
+                print("    (possible instrumental effects or real clustering)")
             else:
-                print(f"  ✓ No significant autocorrelation")
+                print("  OK No significant autocorrelation")
         else:
             autocorr = None
-            print(f"\nLag-1 autocorrelation: N/A (sample size < 50)")
+            print("\nLag-1 autocorrelation: N/A (sample size < 50)")
 
-        # Test for temporal clustering of positive/negative lags
-        # Calculate runs test
         lag_signs = (temporal_df['lag_type'] == 'positive').astype(int)
         n_positive = np.sum(lag_signs)
         n_negative = len(lag_signs) - n_positive
 
-        # Count runs (consecutive sequences of same sign)
         runs = 1
         for i in range(1, len(lag_signs)):
-            if lag_signs[i] != lag_signs[i-1]:
+            if lag_signs[i] != lag_signs[i - 1]:
                 runs += 1
 
-        # Expected runs under random distribution
         expected_runs = 1 + (2 * n_positive * n_negative) / len(lag_signs)
-        runs_std = np.sqrt((2 * n_positive * n_negative * (2 * n_positive * n_negative - len(lag_signs))) /
-                           (len(lag_signs)**2 * (len(lag_signs) - 1)))
+        runs_std = np.sqrt(
+            (2 * n_positive * n_negative * (2 * n_positive * n_negative - len(lag_signs))) /
+            (len(lag_signs)**2 * (len(lag_signs) - 1))
+        )
 
         z_runs = (runs - expected_runs) / runs_std if runs_std > 0 else 0
         p_runs = 2 * (1 - stats.norm.cdf(abs(z_runs)))
@@ -1190,11 +1333,11 @@ class GRBStudy:
 
         if p_runs < 0.05:
             if runs < expected_runs:
-                print(f"  ⚠ Significant clustering (fewer runs than expected)")
+                print("  WARNING Significant clustering (fewer runs than expected)")
             else:
-                print(f"  ⚠ Significant alternation (more runs than expected)")
+                print("  WARNING Significant alternation (more runs than expected)")
         else:
-            print(f"  ✓ Random temporal distribution of lag signs")
+            print("  OK Random temporal distribution of lag signs")
 
         return {
             'data_type': data_type,
@@ -1269,11 +1412,11 @@ class GRBStudy:
         titles = []
 
         if df_fermi is not None:
-            datasets.append(df_fermi)
+            datasets.append(DataProcessor.significant_subset(df_fermi))
             titles.append('Fermi-GBM')
 
         if df_swift is not None:
-            datasets.append(df_swift)
+            datasets.append(DataProcessor.significant_subset(df_swift))
             titles.append('Swift-BAT')
 
         if len(datasets) == 0:
@@ -1302,11 +1445,11 @@ class GRBStudy:
             ax1.set_xlabel('Galactic Longitude', fontsize=10)
             ax1.set_ylabel('Galactic Latitude', fontsize=10)
             ax1.set_title(
-                f'{title} Sky Map\n(color = sign × log₁₀|lag|)', fontsize=11)
+                f'{title} Sky Map\n(color = sign x log10|lag|)', fontsize=11)
             ax1.grid(True, alpha=0.3)
 
             cbar = plt.colorbar(scatter, ax=ax1, pad=0.1, shrink=0.8)
-            cbar.set_label('Signed log₁₀(|lag| [ms])', fontsize=9)
+            cbar.set_label('Signed log10(|lag| [ms])', fontsize=9)
 
             # Histogram of lag distribution
             ax2 = fig.add_subplot(gs[idx, 1])
@@ -1338,19 +1481,16 @@ class GRBStudy:
 
 
 if __name__ == "__main__":
-    # Configuration
-    swift_file = 'swift_full_data.csv'
-    fermi_file = 'fermi_full_data.csv'
+    swift_file = SWIFT_CSV
+    fermi_file = FERMI_CSV
 
     # Run complete analysis on Fermi data
-    print("="*70)
-    print("RUNNING COMPLETE ANALYSIS ON FERMI DATA")
-    print("="*70)
+    print_rule("RUNNING COMPLETE ANALYSIS ON FERMI DATA", "~")
     try:
         fermi_study = GRBStudy(fermi_file)
         fermi_results = fermi_study.run_complete_analysis()
         fermi_study.plot_distributions(
-            output_file='figures/fig_fermi_lag_distributions.png')
+            output_file=FERMI_LAG_FIGURE)
         fermi_spatial = fermi_study.lag_magnitude_spatial_test()
         fermi_temporal = fermi_study.temporal_analysis()
         fermi_available = True
@@ -1365,14 +1505,14 @@ if __name__ == "__main__":
     swift_study = GRBStudy(swift_file)
     swift_results = swift_study.run_complete_analysis()
     swift_study.plot_distributions(
-        output_file='figures/fig_swift_lag_distributions.png')
+        output_file=SWIFT_LAG_FIGURE)
     swift_spatial = swift_study.lag_magnitude_spatial_test()
     swift_temporal = swift_study.temporal_analysis()
 
     # Create comparison sky map (if both datasets available)
-    print("\n" + "="*70)
+    print("\n" + "*"*70)
     print("CREATING COMPARISON SKY MAP")
-    print("="*70)
+    print("*"*70)
     if fermi_available:
         try:
             df_fermi = DataProcessor.load_and_prepare(fermi_file)
@@ -1380,7 +1520,7 @@ if __name__ == "__main__":
             swift_study.plot_comparison_skymap(
                 df_fermi=df_fermi,
                 df_swift=df_swift,
-                output_file='figures/fig_fermi_swift_comparison.png'
+                output_file=COMPARISON_FIGURE
             )
         except Exception as e:
             print(f"\nNote: Could not create comparison plot - {e}")
@@ -1388,38 +1528,39 @@ if __name__ == "__main__":
         print("\nSkipping comparison plot (Fermi data not available)")
 
     # Summary
-    print("\n" + "="*70)
+    print("\n" + "*"*70)
     print("ANALYSIS COMPLETE")
-    print("="*70)
+    print("*"*70)
     print("\nGenerated files:")
-    print("  - figures/fig_fermi_lag_distributions.png")
-    print("  - figures/fig_fermi_swift_comparison.png")
+    print(f"  - {FERMI_LAG_FIGURE}")
+    print(f"  - {SWIFT_LAG_FIGURE}")
+    print(f"  - {COMPARISON_FIGURE}")
 
     print("\nKey findings:")
 
     if fermi_available:
         print("\nFERMI:")
-        print(f"  - Spatial correlation: ρ = {fermi_spatial['spearman_corr']:.4f}, "
+        print(f"  - Spatial correlation: rho = {fermi_spatial['spearman_corr']:.4f}, "
               f"p = {fermi_spatial['spearman_p']:.4f}")
         if fermi_temporal.get('status') != 'insufficient_data':
-            print(f"  - Temporal trend: ρ = {fermi_temporal['temporal_trend_corr']:.4f}, "
+            print(f"  - Temporal trend: rho = {fermi_temporal['temporal_trend_corr']:.4f}, "
                   f"p = {fermi_temporal['temporal_trend_p']:.4f}")
             print(f"  - Runs test: p = {fermi_temporal['runs_p']:.4f}")
             if fermi_temporal.get('autocorr') is not None:
                 print(f"  - Autocorrelation: {fermi_temporal['autocorr']:.4f}")
         else:
             print(
-                f"  - Temporal analysis: {fermi_temporal.get('n_extracted', 0)} events extracted (need ≥10)")
+                f"  - Temporal analysis: {fermi_temporal.get('n_extracted', 0)} events extracted (need >=10)")
 
     print("\nSWIFT:")
-    print(f"  - Spatial correlation: ρ = {swift_spatial['spearman_corr']:.4f}, "
+    print(f"  - Spatial correlation: rho = {swift_spatial['spearman_corr']:.4f}, "
           f"p = {swift_spatial['spearman_p']:.4f}")
     if swift_temporal.get('status') != 'insufficient_data':
-        print(f"  - Temporal trend: ρ = {swift_temporal['temporal_trend_corr']:.4f}, "
+        print(f"  - Temporal trend: rho = {swift_temporal['temporal_trend_corr']:.4f}, "
               f"p = {swift_temporal['temporal_trend_p']:.4f}")
         print(f"  - Runs test: p = {swift_temporal['runs_p']:.4f}")
         if swift_temporal.get('autocorr') is not None:
             print(f"  - Autocorrelation: {swift_temporal['autocorr']:.4f}")
     else:
         print(
-            f"  - Temporal analysis: {swift_temporal.get('n_extracted', 0)} events extracted (need ≥10)")
+            f"  - Temporal analysis: {swift_temporal.get('n_extracted', 0)} events extracted (need >=10)")

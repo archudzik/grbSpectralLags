@@ -1,0 +1,20 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.cache/
+.venv/
+venv/
+
+# Raw NASA downloads are not distributed with the repository.
+fermi_tte_data/
+swift_bat_data/
+
+# Local audit/debug outputs
+swift_local_audit.csv
+swift_catalog_coverage_audit.csv
+results_analysis.txt
+results_parameter_inversion.txt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

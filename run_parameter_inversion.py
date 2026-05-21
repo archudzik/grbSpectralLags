@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, differential_evolution
 
+from config import FERMI_CSV, INVERSION_RANDOM_SEED, SWIFT_CSV
+
 try:
     import matplotlib
     matplotlib.use('Agg')
@@ -55,12 +57,12 @@ class MagnetosphericPhysics:
         self.constants = PhysicalConstants()
 
     def compute_light_cylinder_radius(self, spin_period_ms: float) -> float:
-        """r_LC = c * P / (2π) — radius where corotation velocity equals c"""
+        """r_LC = c * P / (2pi) - radius where corotation velocity equals c"""
         spin_period_s = spin_period_ms * 1e-3
         return self.constants.SPEED_OF_LIGHT_CM_S * spin_period_s / (2 * np.pi)
 
     def compute_winding_delay(self, torus_radius_cm: float, n_windings: float) -> float:
-        """Δt = N × 2πr_torus / c — time for N windings through toroidal field"""
+        """dt = N * 2*pi*r_torus / c - time for N windings through toroidal field"""
         circumference = 2 * np.pi * torus_radius_cm
         return n_windings * circumference / self.constants.SPEED_OF_LIGHT_CM_S
 
@@ -92,11 +94,13 @@ class ParameterBounds:
         self,
         spin_period_range: Tuple[float, float] = (0.5, 10000),
         torus_radius_range: Tuple[float, float] = (1, 50),
-        n_windings_range: Tuple[float, float] = (0, 10)
+        n_windings_range: Tuple[float, float] = (0, 10),
+        random_seed: int = INVERSION_RANDOM_SEED
     ):
         self.spin_period_range = spin_period_range
         self.torus_radius_range = torus_radius_range
         self.n_windings_range = n_windings_range
+        self.rng = np.random.default_rng(random_seed)
 
     def as_list(self) -> List[Tuple[float, float]]:
         return [
@@ -107,9 +111,9 @@ class ParameterBounds:
 
     def generate_random_initial_guess(self) -> np.ndarray:
         return np.array([
-            np.random.uniform(*self.spin_period_range),
-            np.random.uniform(*self.torus_radius_range),
-            np.random.uniform(*self.n_windings_range)
+            self.rng.uniform(*self.spin_period_range),
+            self.rng.uniform(*self.torus_radius_range),
+            self.rng.uniform(*self.n_windings_range)
         ])
 
 
@@ -197,7 +201,7 @@ class GlobalOptimizer:
         max_iterations: int = 1000,
         population_size: int = 15,
         tolerance: float = 1e-7,
-        seed: int = 42
+        seed: int = INVERSION_RANDOM_SEED
     ):
         self.physics = physics
         self.bounds = bounds
@@ -466,7 +470,10 @@ class ParameterInversionStudy:
         self.solutions_df = None
 
     def _load_data(self) -> pd.DataFrame:
-        return pd.read_csv(self.filepath)
+        df = pd.read_csv(self.filepath)
+        if 'is_significant' in df.columns:
+            df = df[df['is_significant']].copy()
+        return df
 
     def run_analysis(self) -> PopulationStatistics:
         self._print_header()
@@ -498,18 +505,18 @@ class ParameterInversionStudy:
         print("\nRESULTS:")
         print(f"  Success rate: {self.statistics.success_rate * 100:.1f}%")
         print(
-            f"  Spin period: {self.statistics.spin_period_median:.2f} ± {self.statistics.spin_period_std:.2f} ms")
+            f"  Spin period: {self.statistics.spin_period_median:.2f} +/- {self.statistics.spin_period_std:.2f} ms")
         print(
-            f"  Torus scale: {self.statistics.torus_radius_median:.1f} ± {self.statistics.torus_radius_std:.1f} r_LC")
+            f"  Torus scale: {self.statistics.torus_radius_median:.1f} +/- {self.statistics.torus_radius_std:.1f} r_LC")
         print(
-            f"  Escape fraction: {self.statistics.n_windings_median:.2f} ± {self.statistics.n_windings_std:.2f}")
+            f"  Escape fraction: {self.statistics.n_windings_median:.2f} +/- {self.statistics.n_windings_std:.2f}")
         print(f"  Mean fit error: {self.statistics.mean_error:.2e}")
 
 
 if __name__ == "__main__":
     try:
         fermi_study = ParameterInversionStudy(
-            filepath='fermi_full_data.csv',
+            filepath=FERMI_CSV,
             output_prefix='fermi',
             optimization_method='global'
         )
@@ -519,7 +526,7 @@ if __name__ == "__main__":
 
     try:
         swift_study = ParameterInversionStudy(
-            filepath='swift_full_data.csv',
+            filepath=SWIFT_CSV,
             output_prefix='swift',
             optimization_method='global'
         )
