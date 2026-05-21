@@ -28,8 +28,8 @@ PLACEHOLDER_COORDS = [(0.0, 0.0), (30.0, -15.0)]
 FERMI_LAG_FIGURE = "figures/fig_fermi_lag_distributions.png"
 SWIFT_LAG_FIGURE = "figures/fig_swift_lag_distributions.png"
 COMPARISON_FIGURE = "figures/fig_fermi_swift_comparison.png"
-FERMI_INVERSION_FIGURE = "figures/fermi_population_optimized.png"
-SWIFT_INVERSION_FIGURE = "figures/swift_population_optimized.png"
+FERMI_INVERSION_FIGURE = "figures/fig_fermi_population_optimized.png"
+SWIFT_INVERSION_FIGURE = "figures/fig_swift_population_optimized.png"
 
 DIRECTIONAL_TEST_FAMILY_SIZE = 4
 OPTIMAL_AXIS_RANDOM_SEED = 12345

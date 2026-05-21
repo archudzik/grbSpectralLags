@@ -21,9 +21,9 @@ Duration metadata are included where matched to the public mission catalogs. Fer
 
 ![Fermi and Swift comparison](figures/fig_fermi_swift_comparison.png)
 
-![Fermi parameter inversion](figures/fermi_population_optimized.png)
+![Fermi parameter inversion](figures/fig_fermi_population_optimized.png)
 
-![Swift parameter inversion](figures/swift_population_optimized.png)
+![Swift parameter inversion](figures/fig_swift_population_optimized.png)
 
 ## Repository Contents
 
