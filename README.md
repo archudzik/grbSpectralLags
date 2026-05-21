@@ -9,9 +9,11 @@ Raw NASA event files are not included. They can be downloaded again with the opt
 | Instrument | Measured lags | Significant positive | Significant negative | Consistent with zero |
 | --- | ---: | ---: | ---: | ---: |
 | Fermi/GBM | 2128 | 1037 | 1051 | 40 |
-| Swift/BAT | 3157 | 241 | 206 | 2710 |
+| Swift/BAT | 3131 | 241 | 206 | 2684 |
 
 Duration metadata are included where matched to the public mission catalogs. Fermi/GBM has complete `T90` coverage in the processed table. Swift/BAT has partial `T90` coverage because not every locally processed event has a matching row in the public BAT summary table.
+
+The measured-lag catalogs include only finite lag estimates. Event files for which the selected prompt-emission window contains no usable soft/hard light-curve peak are skipped during preprocessing rather than being labeled as consistent with zero.
 
 ## Figures
 

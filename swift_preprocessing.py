@@ -144,6 +144,9 @@ class SwiftEventProcessor:
                 soft_rates, hard_rates, self.config.bin_width_seconds
             )
 
+            if not np.isfinite(lag_ms) or not np.isfinite(uncertainty_ms):
+                return None
+
             coords = SkyLocalizationExtractor.get_sky_coordinates(filepath)
 
             if coords is None:
