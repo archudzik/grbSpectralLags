@@ -60,6 +60,16 @@ def main() -> None:
         help="Rebuild processed CSVs from local raw files before analysis.",
     )
     parser.add_argument(
+        "--with-fermi",
+        action="store_true",
+        help="Limit download/preprocessing to Fermi/GBM. If no instrument flag is set, both instruments are used.",
+    )
+    parser.add_argument(
+        "--with-swift",
+        action="store_true",
+        help="Limit download/preprocessing to Swift/BAT. If no instrument flag is set, both instruments are used.",
+    )
+    parser.add_argument(
         "--with-inversion",
         "--with-conversion",
         dest="with_inversion",
@@ -69,17 +79,23 @@ def main() -> None:
     args = parser.parse_args()
 
     python = sys.executable
+    selected_fermi = args.with_fermi or not (args.with_fermi or args.with_swift)
+    selected_swift = args.with_swift or not (args.with_fermi or args.with_swift)
 
     if args.download:
-        run_step("Downloading Fermi raw files", [python, "fermi_download.py"])
-        run_step("Downloading Swift raw files", [python, "swift_download.py"])
+        if selected_fermi:
+            run_step("Downloading Fermi raw files", [python, "fermi_download.py"])
+        if selected_swift:
+            run_step("Downloading Swift raw files", [python, "swift_download.py"])
         args.with_preprocessing = True
 
     if args.with_preprocessing:
-        run_step("Preprocessing Fermi TTE files", [python, "fermi_preprocessing.py"])
-        run_step("Adding Fermi metadata", [python, "fermi_add_metadata.py"])
-        run_step("Preprocessing Swift BAT files", [python, "swift_preprocessing.py"])
-        run_step("Adding Swift metadata", [python, "swift_add_metadata.py"])
+        if selected_fermi:
+            run_step("Preprocessing Fermi TTE files", [python, "fermi_preprocessing.py"])
+            run_step("Adding Fermi metadata", [python, "fermi_add_metadata.py"])
+        if selected_swift:
+            run_step("Preprocessing Swift BAT files", [python, "swift_preprocessing.py"])
+            run_step("Adding Swift metadata", [python, "swift_add_metadata.py"])
 
     validate_inputs()
     run_step("Running statistical analysis", [python, "run_analysis.py"])

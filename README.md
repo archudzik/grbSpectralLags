@@ -131,6 +131,15 @@ The same full rebuild can be launched as:
 python run_pipeline.py --with-preprocessing
 ```
 
+To rebuild only one instrument before running the shared analysis, add an instrument selector:
+
+```bash
+python run_pipeline.py --with-preprocessing --with-fermi
+python run_pipeline.py --with-preprocessing --with-swift
+```
+
+If neither `--with-fermi` nor `--with-swift` is supplied, both instruments are preprocessed.
+
 To also fetch raw public files first:
 
 ```bash
