@@ -1,544 +1,382 @@
-from typing import Tuple, Optional, List, Dict
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize, differential_evolution
 
 from config import (
     FERMI_CSV,
     FERMI_INVERSION_FIGURE,
-    INVERSION_RANDOM_SEED,
     SWIFT_CSV,
     SWIFT_INVERSION_FIGURE,
 )
 
 try:
     import matplotlib
-    matplotlib.use('Agg')
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 
-@dataclass
-class PhysicalConstants:
-    SPEED_OF_LIGHT_CM_S: float = 3e10
-
-
-@dataclass
-class InversionResult:
+@dataclass(frozen=True)
+class ClosureScenario:
+    label: str
     spin_period_ms: float
-    torus_radius_units: float
-    n_windings: float
-    error: float
-    lag_model_ms: float
-    lag_observed_ms: float
+    mean_free_path_units: float = 1.0
 
 
-@dataclass
-class PopulationStatistics:
-    n_solutions: int
-    n_failed: int
-    success_rate: float
-    spin_period_median: float
-    spin_period_std: float
+@dataclass(frozen=True)
+class ClosureStatistics:
+    label: str
+    n_events: int
+    spin_period_ms: float
+    mean_free_path_units: float
+    lag_median_ms: float
+    lag_scale_ms: float
     torus_radius_median: float
     torus_radius_std: float
+    torus_radius_q16: float
+    torus_radius_q84: float
     n_windings_median: float
     n_windings_std: float
-    mean_error: float
+    n_windings_q16: float
+    n_windings_q84: float
 
 
-class MagnetosphericPhysics:
+class DiffusiveClosurePhysics:
     """
-    Magnetospheric wind model for GRB spectral lag.
-    
-    Photons scatter through wound magnetic field structures surrounding
-    nascent neutron stars. Delay arises from N windings through toroidal
-    field at radius r_torus. See Eq. 12 in paper.
+    Diffusive transport closure for GRB spectral lags.
+
+    The measured lag constrains the transport product
+    |tau| = N_diff * r_torus/r_LC * P.
+    The closure ties the effective winding count to optical depth:
+    N_diff = (r_torus/r_LC) / (2*pi*eta),
+    where eta = lambda_mfp/r_LC.
     """
-    
-    def __init__(self):
-        self.constants = PhysicalConstants()
 
-    def compute_light_cylinder_radius(self, spin_period_ms: float) -> float:
-        """r_LC = c * P / (2pi) - radius where corotation velocity equals c"""
-        spin_period_s = spin_period_ms * 1e-3
-        return self.constants.SPEED_OF_LIGHT_CM_S * spin_period_s / (2 * np.pi)
-
-    def compute_winding_delay(self, torus_radius_cm: float, n_windings: float) -> float:
-        """dt = N * 2*pi*r_torus / c - time for N windings through toroidal field"""
-        circumference = 2 * np.pi * torus_radius_cm
-        return n_windings * circumference / self.constants.SPEED_OF_LIGHT_CM_S
-
-    def compute_total_lag_ms(
-        self,
+    @staticmethod
+    def torus_radius_units(
+        lag_ms: np.ndarray,
         spin_period_ms: float,
-        torus_radius_units: float,
-        n_windings: float
-    ) -> float:
-        """
-        Total spectral lag from magnetospheric scattering.
-        
-        Parameters:
-            spin_period_ms: Neutron star rotation period [ms]
-            torus_radius_units: Torus radius in units of r_LC
-            n_windings: Number of field-line windings before escape (N_esc)
-        
-        Returns:
-            Spectral lag [ms]
-        """
-        r_LC = self.compute_light_cylinder_radius(spin_period_ms)
-        r_torus_cm = torus_radius_units * r_LC
-        delay_s = self.compute_winding_delay(r_torus_cm, n_windings)
-        return delay_s * 1e3
+        mean_free_path_units: float,
+    ) -> np.ndarray:
+        if spin_period_ms <= 0:
+            raise ValueError("spin_period_ms must be positive")
+        if mean_free_path_units <= 0:
+            raise ValueError("mean_free_path_units must be positive")
+        return np.sqrt(
+            lag_ms * 2 * np.pi * mean_free_path_units / spin_period_ms
+        )
+
+    @staticmethod
+    def diffusive_windings(
+        torus_radius_units: np.ndarray,
+        mean_free_path_units: float,
+    ) -> np.ndarray:
+        return torus_radius_units / (2 * np.pi * mean_free_path_units)
+
+    @staticmethod
+    def lag_model_ms(
+        torus_radius_units: np.ndarray,
+        spin_period_ms: float,
+        mean_free_path_units: float,
+    ) -> np.ndarray:
+        return spin_period_ms * torus_radius_units ** 2 / (
+            2 * np.pi * mean_free_path_units
+        )
 
 
-class ParameterBounds:
+class DiffusiveClosureAnalyzer:
+    def __init__(self, scenario: ClosureScenario):
+        self.scenario = scenario
+
+    def analyze(self, lags_ms: np.ndarray) -> tuple[ClosureStatistics, pd.DataFrame]:
+        lags_ms = np.asarray(lags_ms, dtype=float)
+        lags_ms = lags_ms[np.isfinite(lags_ms) & (lags_ms > 0)]
+        if len(lags_ms) == 0:
+            raise ValueError("No positive finite lag magnitudes available")
+
+        radius = DiffusiveClosurePhysics.torus_radius_units(
+            lags_ms,
+            self.scenario.spin_period_ms,
+            self.scenario.mean_free_path_units,
+        )
+        windings = DiffusiveClosurePhysics.diffusive_windings(
+            radius,
+            self.scenario.mean_free_path_units,
+        )
+        model_lag = DiffusiveClosurePhysics.lag_model_ms(
+            radius,
+            self.scenario.spin_period_ms,
+            self.scenario.mean_free_path_units,
+        )
+
+        df = pd.DataFrame({
+            "lag_observed_ms": lags_ms,
+            "lag_model_ms": model_lag,
+            "torus_radius_units": radius,
+            "n_diffusive_windings": windings,
+            "transport_product_ms": lags_ms,
+        })
+
+        stats = ClosureStatistics(
+            label=self.scenario.label,
+            n_events=len(df),
+            spin_period_ms=self.scenario.spin_period_ms,
+            mean_free_path_units=self.scenario.mean_free_path_units,
+            lag_median_ms=float(np.median(lags_ms)),
+            lag_scale_ms=float(np.mean(lags_ms)),
+            torus_radius_median=float(np.median(radius)),
+            torus_radius_std=float(np.std(radius, ddof=1)),
+            torus_radius_q16=float(np.percentile(radius, 16)),
+            torus_radius_q84=float(np.percentile(radius, 84)),
+            n_windings_median=float(np.median(windings)),
+            n_windings_std=float(np.std(windings, ddof=1)),
+            n_windings_q16=float(np.percentile(windings, 16)),
+            n_windings_q84=float(np.percentile(windings, 84)),
+        )
+        return stats, df
+
+
+class ClosurePlotter:
     def __init__(
         self,
-        spin_period_range: Tuple[float, float] = (0.5, 10000),
-        torus_radius_range: Tuple[float, float] = (1, 50),
-        n_windings_range: Tuple[float, float] = (0, 10),
-        random_seed: int = INVERSION_RANDOM_SEED
+        output_path: str,
+        instrument_label: str,
+        scenario: ClosureScenario,
+        results: pd.DataFrame,
     ):
-        self.spin_period_range = spin_period_range
-        self.torus_radius_range = torus_radius_range
-        self.n_windings_range = n_windings_range
-        self.rng = np.random.default_rng(random_seed)
-
-    def as_list(self) -> List[Tuple[float, float]]:
-        return [
-            self.spin_period_range,
-            self.torus_radius_range,
-            self.n_windings_range
-        ]
-
-    def generate_random_initial_guess(self) -> np.ndarray:
-        return np.array([
-            self.rng.uniform(*self.spin_period_range),
-            self.rng.uniform(*self.torus_radius_range),
-            self.rng.uniform(*self.n_windings_range)
-        ])
-
-
-class ObjectiveFunction:
-    def __init__(self, physics: MagnetosphericPhysics, observed_lag_ms: float):
-        self.physics = physics
-        self.observed_lag_ms = observed_lag_ms
-
-    def __call__(self, params: np.ndarray) -> float:
-        spin_period_ms, torus_radius_units, n_windings = params
-        model_lag = self.physics.compute_total_lag_ms(
-            spin_period_ms, torus_radius_units, n_windings
-        )
-        return (model_lag - self.observed_lag_ms) ** 2
-
-
-class LocalOptimizer:
-    def __init__(
-        self,
-        physics: MagnetosphericPhysics,
-        bounds: ParameterBounds,
-        n_trials: int = 10
-    ):
-        self.physics = physics
-        self.bounds = bounds
-        self.n_trials = n_trials
-
-    def optimize(self, observed_lag_ms: float) -> Optional[InversionResult]:
-        objective = ObjectiveFunction(self.physics, observed_lag_ms)
-        best_result = None
-        best_error = np.inf
-
-        for _ in range(self.n_trials):
-            initial_guess = self.bounds.generate_random_initial_guess()
-            result = minimize(
-                objective,
-                x0=initial_guess,
-                bounds=self.bounds.as_list(),
-                method='L-BFGS-B'
-            )
-
-            if not result.success:
-                continue
-
-            if not self._is_physically_reasonable(result.x):
-                continue
-
-            if result.fun < best_error:
-                best_error = result.fun
-                best_result = result
-
-        if best_result is None:
-            return None
-
-        return self._create_result(best_result.x, best_result.fun, observed_lag_ms)
-
-    def _is_physically_reasonable(self, params: np.ndarray) -> bool:
-        n_windings = params[2]
-        return 0 <= n_windings <= 10
-
-    def _create_result(
-        self,
-        params: np.ndarray,
-        error: float,
-        observed_lag_ms: float
-    ) -> InversionResult:
-        spin_period_ms, torus_radius_units, n_windings = params
-        return InversionResult(
-            spin_period_ms=spin_period_ms,
-            torus_radius_units=torus_radius_units,
-            n_windings=n_windings,
-            error=error,
-            lag_model_ms=self.physics.compute_total_lag_ms(
-                spin_period_ms, torus_radius_units, n_windings
-            ),
-            lag_observed_ms=observed_lag_ms
-        )
-
-
-class GlobalOptimizer:
-    def __init__(
-        self,
-        physics: MagnetosphericPhysics,
-        bounds: ParameterBounds,
-        max_iterations: int = 1000,
-        population_size: int = 15,
-        tolerance: float = 1e-7,
-        seed: int = INVERSION_RANDOM_SEED
-    ):
-        self.physics = physics
-        self.bounds = bounds
-        self.max_iterations = max_iterations
-        self.population_size = population_size
-        self.tolerance = tolerance
-        self.seed = seed
-
-    def optimize(self, observed_lag_ms: float) -> Optional[InversionResult]:
-        objective = ObjectiveFunction(self.physics, observed_lag_ms)
-
-        result = differential_evolution(
-            objective,
-            bounds=self.bounds.as_list(),
-            strategy='best1bin',
-            maxiter=self.max_iterations,
-            popsize=self.population_size,
-            tol=self.tolerance,
-            seed=self.seed
-        )
-
-        if not result.success:
-            return None
-
-        if not self._is_physically_reasonable(result.x):
-            return None
-
-        return self._create_result(result.x, result.fun, observed_lag_ms)
-
-    def _is_physically_reasonable(self, params: np.ndarray) -> bool:
-        n_windings = params[2]
-        return 0 <= n_windings <= 10
-
-    def _create_result(
-        self,
-        params: np.ndarray,
-        error: float,
-        observed_lag_ms: float
-    ) -> InversionResult:
-        spin_period_ms, torus_radius_units, n_windings = params
-        return InversionResult(
-            spin_period_ms=spin_period_ms,
-            torus_radius_units=torus_radius_units,
-            n_windings=n_windings,
-            error=error,
-            lag_model_ms=self.physics.compute_total_lag_ms(
-                spin_period_ms, torus_radius_units, n_windings
-            ),
-            lag_observed_ms=observed_lag_ms
-        )
-
-
-class PopulationAnalyzer:
-    def __init__(
-        self,
-        optimization_method: str = 'global',
-        sample_size: int = 2000
-    ):
-        self.physics = MagnetosphericPhysics()
-        self.bounds = ParameterBounds()
-        self.optimization_method = optimization_method
-        self.sample_size = sample_size
-        self.optimizer = self._create_optimizer()
-
-    def _create_optimizer(self):
-        if self.optimization_method == 'global':
-            return GlobalOptimizer(self.physics, self.bounds)
-        return LocalOptimizer(self.physics, self.bounds)
-
-    def analyze(self, lags_ms: np.ndarray) -> Tuple[PopulationStatistics, pd.DataFrame]:
-        self._print_input_summary(lags_ms)
-        solutions = self._run_inversion(lags_ms)
-        return self._compute_statistics(solutions, lags_ms)
-
-    def _print_input_summary(self, lags_ms: np.ndarray):
-        print(
-            f"\nAnalyzing {len(lags_ms)} observed lags with {self.optimization_method} optimization...")
-        print(f"Range: {lags_ms.min():.1f} - {lags_ms.max():.1f} ms")
-        print(f"Median: {np.median(lags_ms):.1f} ms")
-
-    def _run_inversion(self, lags_ms: np.ndarray) -> List[InversionResult]:
-        effective_sample_size = min(self.sample_size, len(lags_ms))
-        lags_sample = lags_ms[:effective_sample_size]
-        solutions = []
-
-        for i, lag in enumerate(lags_sample):
-            if (i + 1) % 20 == 0:
-                print(f"  Progress: {i+1}/{effective_sample_size}")
-
-            result = self.optimizer.optimize(lag)
-            if result is not None:
-                solutions.append(result)
-
-        return solutions
-
-    def _compute_statistics(
-        self,
-        solutions: List[InversionResult],
-        lags_ms: np.ndarray
-    ) -> Tuple[PopulationStatistics, pd.DataFrame]:
-        effective_sample_size = min(self.sample_size, len(lags_ms))
-        n_failed = effective_sample_size - len(solutions)
-
-        print(f"\nSuccessful fits: {len(solutions)}/{effective_sample_size}")
-        print(f"Failed fits: {n_failed}/{effective_sample_size}")
-
-        if len(solutions) == 0:
-            print("ERROR: No solutions found!")
-            return None, None
-
-        df_solutions = self._solutions_to_dataframe(solutions)
-
-        statistics = PopulationStatistics(
-            n_solutions=len(solutions),
-            n_failed=n_failed,
-            success_rate=len(solutions) / effective_sample_size,
-            spin_period_median=df_solutions['spin_period_ms'].median(),
-            spin_period_std=df_solutions['spin_period_ms'].std(),
-            torus_radius_median=df_solutions['torus_radius_units'].median(),
-            torus_radius_std=df_solutions['torus_radius_units'].std(),
-            n_windings_median=df_solutions['n_windings'].median(),
-            n_windings_std=df_solutions['n_windings'].std(),
-            mean_error=df_solutions['error'].mean()
-        )
-
-        return statistics, df_solutions
-
-    def _solutions_to_dataframe(self, solutions: List[InversionResult]) -> pd.DataFrame:
-        return pd.DataFrame([
-            {
-                'spin_period_ms': s.spin_period_ms,
-                'torus_radius_units': s.torus_radius_units,
-                'n_windings': s.n_windings,
-                'error': s.error,
-                'lag_model_ms': s.lag_model_ms,
-                'lag_observed_ms': s.lag_observed_ms
-            }
-            for s in solutions
-        ])
-
-
-class PopulationPlotter:
-    def __init__(self, df_solutions: pd.DataFrame, output_path: str):
-        self.df = df_solutions
         self.output_path = output_path
+        self.instrument_label = instrument_label
+        self.scenario = scenario
+        self.results = results
 
-    def create_population_plot(self):
+    def create_plot(self) -> str | None:
         if not MATPLOTLIB_AVAILABLE:
             print("Warning: matplotlib not available. Cannot generate plot.")
             return None
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        self._plot_lag_distribution(axes[0, 0])
+        self._plot_radius_distribution(axes[0, 1])
+        self._plot_winding_distribution(axes[1, 0])
+        self._plot_model_check(axes[1, 1])
 
-        self._plot_spin_period_distribution(axes[0, 0])
-        self._plot_torus_radius_distribution(axes[0, 1])
-        self._plot_n_windings_distribution(axes[1, 0])
-        self._plot_fit_quality(axes[1, 1])
-
-        plt.tight_layout()
-        plt.savefig(self.output_path, dpi=150, bbox_inches='tight')
+        fig.suptitle(
+            (
+                f"{self.instrument_label} diffusive-closure inversion "
+                f"(P={self.scenario.spin_period_ms:g} ms, "
+                f"eta={self.scenario.mean_free_path_units:g})"
+            ),
+            fontsize=13,
+        )
+        plt.tight_layout(rect=(0, 0, 1, 0.96))
+        plt.savefig(self.output_path, dpi=150, bbox_inches="tight")
         plt.close()
-
-        print(f"Population plot saved to {self.output_path}")
+        print(f"Closure plot saved to {self.output_path}")
         return self.output_path
 
-    def _plot_spin_period_distribution(self, ax):
-        ax.hist(
-            self.df['spin_period_ms'],
-            bins=30,
-            alpha=0.7,
-            color='blue',
-            edgecolor='black'
-        )
-        median_value = self.df['spin_period_ms'].median()
-        ax.axvline(
-            median_value,
-            color='red',
-            linestyle='--',
-            label=f'Median: {median_value:.2f} ms'
-        )
-        ax.set_xlabel('Spin Period (ms)', fontsize=11)
-        ax.set_ylabel('Count', fontsize=11)
-        ax.set_title('NS Spin Period Distribution', fontsize=12)
+    def _plot_lag_distribution(self, ax):
+        values = self.results["lag_observed_ms"].to_numpy()
+        bins = np.logspace(0, np.log10(values.max()), 40)
+        ax.hist(values, bins=bins, color="#4c72b0", alpha=0.75, edgecolor="black")
+        ax.axvline(np.median(values), color="#c44e52", linestyle="--",
+                   label=f"Median: {np.median(values) / 1000:.1f} s")
+        ax.set_xscale("log")
+        ax.set_xlabel("|Lag| (ms)")
+        ax.set_ylabel("Count")
+        ax.set_title("Observed Lag Magnitudes")
+        ax.legend()
+        ax.grid(alpha=0.3, which="both")
+
+    def _plot_radius_distribution(self, ax):
+        values = self.results["torus_radius_units"].to_numpy()
+        ax.hist(values, bins=40, color="#55a868", alpha=0.75, edgecolor="black")
+        ax.axvline(np.median(values), color="#c44e52", linestyle="--",
+                   label=f"Median: {np.median(values):.2f} r_LC")
+        ax.set_xlabel("Torus Radius (r_LC)")
+        ax.set_ylabel("Count")
+        ax.set_title("Diffusive Torus Scale")
         ax.legend()
         ax.grid(alpha=0.3)
 
-    def _plot_torus_radius_distribution(self, ax):
-        ax.hist(
-            self.df['torus_radius_units'],
-            bins=30,
-            alpha=0.7,
-            color='green',
-            edgecolor='black'
-        )
-        median_value = self.df['torus_radius_units'].median()
-        ax.axvline(
-            median_value,
-            color='red',
-            linestyle='--',
-            label=f'Median: {median_value:.1f} r_LC'
-        )
-        ax.set_xlabel('Torus Radius (r_LC)', fontsize=11)
-        ax.set_ylabel('Count', fontsize=11)
-        ax.set_title('Magnetospheric Scale', fontsize=12)
+    def _plot_winding_distribution(self, ax):
+        values = self.results["n_diffusive_windings"].to_numpy()
+        ax.hist(values, bins=40, color="#dd8452", alpha=0.75, edgecolor="black")
+        ax.axvline(np.median(values), color="#c44e52", linestyle="--",
+                   label=f"Median: {np.median(values):.2f}")
+        ax.set_xlabel("N_diff (windings)")
+        ax.set_ylabel("Count")
+        ax.set_title("Diffusive Winding Count")
         ax.legend()
         ax.grid(alpha=0.3)
 
-    def _plot_n_windings_distribution(self, ax):
-        ax.hist(
-            self.df['n_windings'],
-            bins=30,
-            alpha=0.7,
-            color='orange',
-            edgecolor='black'
-        )
-        median_value = self.df['n_windings'].median()
-        ax.axvline(
-            median_value,
-            color='red',
-            linestyle='--',
-            label=f'Median: {median_value:.2f}'
-        )
-        ax.set_xlabel('N_esc (windings)', fontsize=11)
-        ax.set_ylabel('Count', fontsize=11)
-        ax.set_title('Escape Windings', fontsize=12)
+    def _plot_model_check(self, ax):
+        observed = self.results["lag_observed_ms"].to_numpy()
+        modeled = self.results["lag_model_ms"].to_numpy()
+        ax.scatter(observed, modeled, alpha=0.45, s=16, color="#8172b3")
+        low = min(observed.min(), modeled.min())
+        high = max(observed.max(), modeled.max())
+        ax.plot([low, high], [low, high], color="#c44e52",
+                linestyle="--", label="Closure identity")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Observed |Lag| (ms)")
+        ax.set_ylabel("Closure Model |Lag| (ms)")
+        ax.set_title("Forward Check")
         ax.legend()
-        ax.grid(alpha=0.3)
-
-    def _plot_fit_quality(self, ax):
-        ax.scatter(
-            self.df['lag_observed_ms'],
-            self.df['lag_model_ms'],
-            alpha=0.5,
-            s=20,
-            color='purple'
-        )
-        lag_min = self.df['lag_observed_ms'].min()
-        lag_max = self.df['lag_observed_ms'].max()
-        ax.plot([lag_min, lag_max], [lag_min, lag_max],
-                'r--', label='Perfect fit')
-        ax.set_xlabel('Observed Lag (ms)', fontsize=11)
-        ax.set_ylabel('Model Lag (ms)', fontsize=11)
-        ax.set_title('Model Fit Quality', fontsize=12)
-        ax.set_xscale('log')
-        ax.set_yscale('log')
-        ax.legend()
-        ax.grid(alpha=0.3, which='both')
+        ax.grid(alpha=0.3, which="both")
 
 
-class ParameterInversionStudy:
+class ClosureStudy:
     def __init__(
         self,
         filepath: str,
         output_prefix: str,
         output_figure: str,
-        optimization_method: str = 'global',
-        sample_size: int = 2000
+        primary_scenario: ClosureScenario,
+        comparison_scenarios: Iterable[ClosureScenario],
     ):
         self.filepath = filepath
         self.output_prefix = output_prefix
         self.output_figure = output_figure
-        self.optimization_method = optimization_method
-        self.sample_size = sample_size
+        self.primary_scenario = primary_scenario
+        self.comparison_scenarios = list(comparison_scenarios)
         self.df = self._load_data()
-        self.lags_ms = np.abs(self.df['lag_ms'].values)
-        self.statistics = None
-        self.solutions_df = None
+        self.lags_ms = np.abs(self.df["lag_ms"].to_numpy(dtype=float))
 
     def _load_data(self) -> pd.DataFrame:
         df = pd.read_csv(self.filepath)
-        if 'is_significant' in df.columns:
-            df = df[df['is_significant']].copy()
+        if "is_significant" in df.columns:
+            df = df[df["is_significant"].astype(bool)].copy()
         return df
 
-    def run_analysis(self) -> PopulationStatistics:
-        self._print_header()
-
-        analyzer = PopulationAnalyzer(
-            optimization_method=self.optimization_method,
-            sample_size=self.sample_size
-        )
-
-        self.statistics, self.solutions_df = analyzer.analyze(self.lags_ms)
-
-        if self.statistics is not None:
-            self._create_plots()
-            self._print_results()
-
-        return self.statistics
-
-    def _print_header(self):
+    def run(self) -> pd.DataFrame:
         print("\n" + "=" * 70)
-        print(f"{self.output_prefix.upper()}: {len(self.lags_ms)} lags")
+        print(f"{self.output_prefix.upper()}: DIFFUSIVE CLOSURE INVERSION")
         print("=" * 70)
+        print(f"Input file: {self.filepath}")
+        print(f"Significant lags: {len(self.lags_ms)}")
 
-    def _create_plots(self):
-        if self.solutions_df is not None:
-            plotter = PopulationPlotter(self.solutions_df, self.output_figure)
-            plotter.create_population_plot()
+        all_stats = []
+        primary_results = None
 
-    def _print_results(self):
-        print("\nRESULTS:")
-        print(f"  Success rate: {self.statistics.success_rate * 100:.1f}%")
+        for scenario in [self.primary_scenario, *self.comparison_scenarios]:
+            stats, results = DiffusiveClosureAnalyzer(scenario).analyze(self.lags_ms)
+            all_stats.append(stats)
+            self._print_statistics(stats)
+            enriched_results = self._with_event_metadata(results)
+
+            if scenario == self.primary_scenario:
+                primary_results = enriched_results
+                csv_path = f"{self.output_prefix}_diffusive_closure.csv"
+                enriched_results.to_csv(csv_path, index=False)
+                print(f"Saved primary closure table to {csv_path}")
+
+        if primary_results is not None:
+            ClosurePlotter(
+                output_path=self.output_figure,
+                instrument_label=self.output_prefix.upper(),
+                scenario=self.primary_scenario,
+                results=primary_results,
+            ).create_plot()
+
+        stats_df = pd.DataFrame([stats.__dict__ for stats in all_stats])
+        stats_path = f"{self.output_prefix}_diffusive_closure_summary.csv"
+        stats_df.to_csv(stats_path, index=False)
+        print(f"Saved closure summary to {stats_path}")
+        return stats_df
+
+    def _with_event_metadata(self, results: pd.DataFrame) -> pd.DataFrame:
+        metadata_columns = [
+            "instrument",
+            "filename",
+            "grb_name",
+            "grb_time_utc",
+            "ra",
+            "dec",
+            "lag_ms",
+            "lag_error",
+            "lag_significance",
+            "lag_type",
+            "lag_class",
+            "t90_s",
+            "duration_class",
+        ]
+        available_columns = [
+            column for column in metadata_columns if column in self.df.columns
+        ]
+        metadata = self.df[available_columns].reset_index(drop=True)
+        enriched = pd.concat(
+            [metadata, results.reset_index(drop=True)],
+            axis=1,
+        )
+        return enriched
+
+    @staticmethod
+    def _print_statistics(stats: ClosureStatistics) -> None:
+        print(f"\nScenario: {stats.label}")
         print(
-            f"  Spin period: {self.statistics.spin_period_median:.2f} +/- {self.statistics.spin_period_std:.2f} ms")
+            f"  P = {stats.spin_period_ms:g} ms, "
+            f"eta = {stats.mean_free_path_units:g}"
+        )
         print(
-            f"  Torus scale: {self.statistics.torus_radius_median:.1f} +/- {self.statistics.torus_radius_std:.1f} r_LC")
+            f"  Lag median/mean scale: "
+            f"{stats.lag_median_ms / 1000:.2f} / "
+            f"{stats.lag_scale_ms / 1000:.2f} s"
+        )
         print(
-            f"  Escape fraction: {self.statistics.n_windings_median:.2f} +/- {self.statistics.n_windings_std:.2f}")
-        print(f"  Mean fit error: {self.statistics.mean_error:.2e}")
+            f"  r_torus: median {stats.torus_radius_median:.2f} r_LC "
+            f"(16-84%: {stats.torus_radius_q16:.2f}-"
+            f"{stats.torus_radius_q84:.2f})"
+        )
+        print(
+            f"  N_diff:  median {stats.n_windings_median:.2f} "
+            f"(16-84%: {stats.n_windings_q16:.2f}-"
+            f"{stats.n_windings_q84:.2f})"
+        )
 
 
 if __name__ == "__main__":
-    try:
-        fermi_study = ParameterInversionStudy(
-            filepath=FERMI_CSV,
-            output_prefix='fermi',
-            output_figure=FERMI_INVERSION_FIGURE,
-            optimization_method='global'
-        )
-        fermi_stats = fermi_study.run_analysis()
-    except Exception as e:
-        print(f"\nFermi data error: {e}")
+    primary = ClosureScenario(
+        label="effective transport scale",
+        spin_period_ms=1500.0,
+        mean_free_path_units=1.0,
+    )
+    comparisons = [
+        ClosureScenario(
+            label="fast engine scale",
+            spin_period_ms=1.5,
+            mean_free_path_units=1.0,
+        ),
+        ClosureScenario(
+            label="more transparent transport",
+            spin_period_ms=1500.0,
+            mean_free_path_units=3.0,
+        ),
+        ClosureScenario(
+            label="denser transport",
+            spin_period_ms=1500.0,
+            mean_free_path_units=0.3,
+        ),
+    ]
 
-    try:
-        swift_study = ParameterInversionStudy(
-            filepath=SWIFT_CSV,
-            output_prefix='swift',
-            output_figure=SWIFT_INVERSION_FIGURE,
-            optimization_method='global'
-        )
-        swift_stats = swift_study.run_analysis()
-    except Exception as e:
-        print(f"\nSwift data error: {e}")
+    fermi_summary = ClosureStudy(
+        filepath=FERMI_CSV,
+        output_prefix="fermi",
+        output_figure=FERMI_INVERSION_FIGURE,
+        primary_scenario=primary,
+        comparison_scenarios=comparisons,
+    ).run()
+
+    swift_summary = ClosureStudy(
+        filepath=SWIFT_CSV,
+        output_prefix="swift",
+        output_figure=SWIFT_INVERSION_FIGURE,
+        primary_scenario=primary,
+        comparison_scenarios=comparisons,
+    ).run()
