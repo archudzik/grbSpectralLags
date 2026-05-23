@@ -23,9 +23,9 @@ The measured-lag catalogs include only finite lag estimates. Event files for whi
 
 ![Fermi and Swift comparison](figures/fig_fermi_swift_comparison.png)
 
-![Fermi diffusive-closure inversion](figures/fig_fermi_population_optimized.png)
+![Fermi diffusive-closure calculation](figures/fig_fermi_population_optimized.png)
 
-![Swift diffusive-closure inversion](figures/fig_swift_population_optimized.png)
+![Swift diffusive-closure calculation](figures/fig_swift_population_optimized.png)
 
 ## Repository Contents
 
@@ -46,7 +46,7 @@ The measured-lag catalogs include only finite lag estimates. Event files for whi
 ├── fermi_add_metadata.py
 ├── swift_add_metadata.py
 ├── run_analysis.py
-├── run_parameter_inversion.py
+├── run_diffusive_closure.py
 ├── run_magnetic_flow_calculation.py
 ├── fermi_download.py
 ├── swift_download.py
@@ -76,10 +76,10 @@ python run_pipeline.py
 
 This validates both catalogs, runs the statistical analysis, and regenerates the main figures.
 
-Run the same workflow plus the diffusive-closure inversion:
+Run the same workflow plus the diffusive-closure transport calculation:
 
 ```bash
-python run_pipeline.py --with-inversion
+python run_pipeline.py --with-closure
 ```
 
 Run only the statistical analysis and regenerate the main figures:
@@ -88,22 +88,22 @@ Run only the statistical analysis and regenerate the main figures:
 python run_analysis.py
 ```
 
-Run the neutron-star transport diffusive-closure inversion:
+Run the neutron-star transport diffusive-closure calculation:
 
 ```bash
-python run_parameter_inversion.py
+python run_diffusive_closure.py
 ```
 
 These commands read `fermi_full_data.csv` and `swift_full_data.csv`, write plots into `figures/`, and write closure tables plus scenario summaries to `*_diffusive_closure*.csv`.
 
-`run_parameter_inversion.py` uses the closure
+`run_diffusive_closure.py` uses the closure
 
 ```text
 N_diff = (r_torus/r_LC) / (2*pi*eta)
 |lag| = P * (r_torus/r_LC)^2 / (2*pi*eta)
 ```
 
-with a fiducial scenario `P_eff = 1500 ms` and `eta = 1`, plus sensitivity scenarios for a fast engine scale and different mean-free-path ratios. `run_magnetic_flow_calculation.py` is a supplementary theory-side calculation script. It is not required for regenerating the processed catalogs or the main statistical figures.
+with a compact-radius benchmark anchored to `r_LC = 150 km` (`P = 3.14 ms`) and a Fermi-calibrated `eta = 2.54e-5`, plus comparison scenarios for an extended low-winding transport region and different mean-free-path ratios. `run_magnetic_flow_calculation.py` is a supplementary theory-side calculation script. It is not required for regenerating the processed catalogs or the main statistical figures.
 
 ## Optional Full Reprocessing
 
@@ -133,7 +133,7 @@ python swift_add_metadata.py
 Then rerun:
 
 ```bash
-python run_pipeline.py --with-inversion
+python run_pipeline.py --with-closure
 ```
 
 The same full rebuild can be launched as:

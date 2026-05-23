@@ -336,7 +336,7 @@ class RefinedAnalysis:
         print("8. REFINED CALCULATION WITH POPULATION PARAMETERS")
         print("=" * 70)
         
-        print(f"Median parameters from Fermi inversion:")
+        print(f"Median parameters from Fermi closure calculation:")
         print(f"  P = {self.P} s")
         print(f"  r_torus = {self.r_torus_units} r_LC = {self.r_torus:.2e} cm")
         print(f"  N_wind = {self.N_wind}")

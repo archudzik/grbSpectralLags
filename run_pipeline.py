@@ -70,11 +70,10 @@ def main() -> None:
         help="Limit download/preprocessing to Swift/BAT. If no instrument flag is set, both instruments are used.",
     )
     parser.add_argument(
-        "--with-inversion",
-        "--with-conversion",
-        dest="with_inversion",
+        "--with-closure",
+        dest="with_closure",
         action="store_true",
-        help="Run the parameter-inversion step after the statistical analysis.",
+        help="Run the diffusive-closure transport calculation after the statistical analysis.",
     )
     args = parser.parse_args()
 
@@ -100,8 +99,8 @@ def main() -> None:
     validate_inputs()
     run_step("Running statistical analysis", [python, "run_analysis.py"])
 
-    if args.with_inversion:
-        run_step("Running parameter inversion", [python, "run_parameter_inversion.py"])
+    if args.with_closure:
+        run_step("Running diffusive closure", [python, "run_diffusive_closure.py"])
 
     print_rule("Pipeline complete")
 

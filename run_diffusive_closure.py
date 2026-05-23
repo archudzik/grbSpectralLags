@@ -8,10 +8,15 @@ import pandas as pd
 
 from config import (
     FERMI_CSV,
-    FERMI_INVERSION_FIGURE,
+    FERMI_CLOSURE_FIGURE,
     SWIFT_CSV,
-    SWIFT_INVERSION_FIGURE,
+    SWIFT_CLOSURE_FIGURE,
 )
+
+
+COMPACT_LIGHT_CYLINDER_RADIUS_KM = 150.0
+COMPACT_TRANSPORT_RADIUS_KM = 150.0
+C_CM_PER_S = 3e10
 
 try:
     import matplotlib
@@ -27,6 +32,53 @@ class ClosureScenario:
     label: str
     spin_period_ms: float
     mean_free_path_units: float = 1.0
+
+    @classmethod
+    def from_target_geometry(
+        cls,
+        label: str,
+        lag_ms: float,
+        torus_radius_units: float,
+        diffusive_windings: float,
+    ) -> "ClosureScenario":
+        if lag_ms <= 0:
+            raise ValueError("lag_ms must be positive")
+        if torus_radius_units <= 0:
+            raise ValueError("torus_radius_units must be positive")
+        if diffusive_windings <= 0:
+            raise ValueError("diffusive_windings must be positive")
+
+        eta = torus_radius_units / (2 * np.pi * diffusive_windings)
+        period_ms = lag_ms / (diffusive_windings * torus_radius_units)
+        return cls(
+            label=label,
+            spin_period_ms=float(period_ms),
+            mean_free_path_units=float(eta),
+        )
+
+    @classmethod
+    def from_compact_radius(
+        cls,
+        label: str,
+        lag_ms: float,
+        light_cylinder_radius_km: float,
+        transport_radius_km: float,
+    ) -> "ClosureScenario":
+        if lag_ms <= 0:
+            raise ValueError("lag_ms must be positive")
+        if light_cylinder_radius_km <= 0:
+            raise ValueError("light_cylinder_radius_km must be positive")
+        if transport_radius_km <= 0:
+            raise ValueError("transport_radius_km must be positive")
+
+        period_ms = period_ms_for_light_cylinder(light_cylinder_radius_km)
+        torus_radius_units = transport_radius_km / light_cylinder_radius_km
+        eta = torus_radius_units ** 2 * period_ms / (2 * np.pi * lag_ms)
+        return cls(
+            label=label,
+            spin_period_ms=float(period_ms),
+            mean_free_path_units=float(eta),
+        )
 
 
 @dataclass(frozen=True)
@@ -168,7 +220,7 @@ class ClosurePlotter:
 
         fig.suptitle(
             (
-                f"{self.instrument_label} diffusive-closure inversion "
+                f"{self.instrument_label} diffusive-closure calculation "
                 f"(P={self.scenario.spin_period_ms:g} ms, "
                 f"eta={self.scenario.mean_free_path_units:g})"
             ),
@@ -257,10 +309,15 @@ class ClosureStudy:
 
     def run(self) -> pd.DataFrame:
         print("\n" + "=" * 70)
-        print(f"{self.output_prefix.upper()}: DIFFUSIVE CLOSURE INVERSION")
+        print(f"{self.output_prefix.upper()}: DIFFUSIVE CLOSURE CALCULATION")
         print("=" * 70)
         print(f"Input file: {self.filepath}")
         print(f"Significant lags: {len(self.lags_ms)}")
+        print(
+            "Primary compact-radius target: "
+            f"r_LC={COMPACT_LIGHT_CYLINDER_RADIUS_KM:g} km, "
+            f"r_torus={COMPACT_TRANSPORT_RADIUS_KM:g} km"
+        )
 
         all_stats = []
         primary_results = None
@@ -321,7 +378,7 @@ class ClosureStudy:
     def _print_statistics(stats: ClosureStatistics) -> None:
         print(f"\nScenario: {stats.label}")
         print(
-            f"  P = {stats.spin_period_ms:g} ms, "
+            f"  P_scale = {stats.spin_period_ms:g} ms, "
             f"eta = {stats.mean_free_path_units:g}"
         )
         print(
@@ -341,34 +398,53 @@ class ClosureStudy:
         )
 
 
+def significant_lag_median_ms(filepath: str) -> float:
+    df = pd.read_csv(filepath)
+    if "is_significant" in df.columns:
+        df = df[df["is_significant"].astype(bool)].copy()
+    lags_ms = np.abs(df["lag_ms"].to_numpy(dtype=float))
+    lags_ms = lags_ms[np.isfinite(lags_ms) & (lags_ms > 0)]
+    if len(lags_ms) == 0:
+        raise ValueError(f"No positive finite lag magnitudes in {filepath}")
+    return float(np.median(lags_ms))
+
+
+def period_ms_for_light_cylinder(radius_km: float) -> float:
+    if radius_km <= 0:
+        raise ValueError("radius_km must be positive")
+    return float(2 * np.pi * radius_km * 1e5 / C_CM_PER_S * 1000)
+
+
 if __name__ == "__main__":
-    primary = ClosureScenario(
-        label="effective transport scale",
-        spin_period_ms=1500.0,
-        mean_free_path_units=1.0,
+    fermi_median_ms = significant_lag_median_ms(FERMI_CSV)
+    primary = ClosureScenario.from_compact_radius(
+        label="compact 150 km transport radius",
+        lag_ms=fermi_median_ms,
+        light_cylinder_radius_km=COMPACT_LIGHT_CYLINDER_RADIUS_KM,
+        transport_radius_km=COMPACT_TRANSPORT_RADIUS_KM,
     )
     comparisons = [
         ClosureScenario(
-            label="fast engine scale",
-            spin_period_ms=1.5,
-            mean_free_path_units=1.0,
+            label="extended 10 r_LC illustrative geometry",
+            spin_period_ms=fermi_median_ms / (1.5 * 10.0),
+            mean_free_path_units=10.0 / (2 * np.pi * 1.5),
         ),
         ClosureScenario(
             label="more transparent transport",
-            spin_period_ms=1500.0,
-            mean_free_path_units=3.0,
+            spin_period_ms=primary.spin_period_ms,
+            mean_free_path_units=primary.mean_free_path_units * 3.0,
         ),
         ClosureScenario(
             label="denser transport",
-            spin_period_ms=1500.0,
-            mean_free_path_units=0.3,
+            spin_period_ms=primary.spin_period_ms,
+            mean_free_path_units=primary.mean_free_path_units * 0.3,
         ),
     ]
 
     fermi_summary = ClosureStudy(
         filepath=FERMI_CSV,
         output_prefix="fermi",
-        output_figure=FERMI_INVERSION_FIGURE,
+        output_figure=FERMI_CLOSURE_FIGURE,
         primary_scenario=primary,
         comparison_scenarios=comparisons,
     ).run()
@@ -376,7 +452,7 @@ if __name__ == "__main__":
     swift_summary = ClosureStudy(
         filepath=SWIFT_CSV,
         output_prefix="swift",
-        output_figure=SWIFT_INVERSION_FIGURE,
+        output_figure=SWIFT_CLOSURE_FIGURE,
         primary_scenario=primary,
         comparison_scenarios=comparisons,
     ).run()
