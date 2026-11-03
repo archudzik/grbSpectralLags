@@ -173,3 +173,7 @@ lag_ms, lag_error, lag_significance, is_significant,
 lag_type, lag_class, t90_s, t90_error_s, t50_s,
 t50_error_s, duration_class
 ```
+
+## Licensing and provenance
+
+The original Python analysis and processing scripts in this repository are released under the MIT License in `LICENSE-CODE`. This license does **not** cover the Fermi/GBM and Swift/BAT source mission data, external catalog metadata, or third-party dependencies. The processed `fermi_*.csv` and `swift_*.csv` catalogs incorporate public mission observations; no new open-data license is granted for these files by this repository. Consult the source missions' terms and citation requirements before redistributing data. Figures and derived tables remain subject to their source-data attribution and any applicable publication terms.
